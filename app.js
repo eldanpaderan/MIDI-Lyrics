@@ -1020,4 +1020,556 @@ document.addEventListener('DOMContentLoaded', () => {
   initSidebarCollapse();
   initAutoFit();
   updateFullscreenBtn();
+  initLibraryUI();
+  initFullscreenAutoCollapse();
 });
+
+/* ============================================================
+   PHASE 9: CLOUD SONG LIBRARY UI
+   (Song Library, Favorites, Collections, Playlists, Recent Songs,
+   Search, Song Metadata, Auto-save, Lyrics Editor, Import .txt,
+   Cloud Lyrics, Better Fullscreen)
+
+   Everything below is additive — it reuses services/firebase/* via
+   window.MLFirebase (see services/firebase/browser-bridge.js) and
+   reuses the EXISTING loadLyrics(song, text) function unchanged for
+   actually displaying a song on stage, so MIDI playback and the
+   existing Leader/Follower synchronization are not touched by any of
+   this. This is a NEW, parallel way to browse/edit songs stored in
+   Firebase — it coexists with, and does not replace, the existing
+   GitHub-folder-based setlist (loadSongList/renderSetlist).
+
+   "Playlist" here is the UI-facing name for services/firebase/
+   library.js's Setlist functions (ordered song sequences) — the
+   backend function names were intentionally left unchanged.
+   ============================================================ */
+
+let libraryCache = {};
+let collectionsCache = {};
+let playlistsCache = {};
+let librarySearchQuery = '';
+let currentEditingSongId = null;
+let editorAutosaveTimer = null;
+let activeCollectionId = null;
+let activePlaylistId = null;
+let activePlaylistQueue = null; // { id, name, songIds, index }
+let libraryWatchersStarted = false;
+
+function libraryServicesAvailable() {
+  return !!(window.MLFirebase && window.MLFirebase.isFirebaseInitialized && window.MLFirebase.isFirebaseInitialized());
+}
+
+function initLibraryUI() {
+  // Watchers are started lazily, the first time the Library modal is
+  // opened (see openLibraryModal) rather than at page load — Firebase
+  // may not be configured/enabled yet at DOMContentLoaded time, and
+  // there is no reason to hold open Realtime Database listeners for a
+  // panel the person hasn't opened.
+}
+
+function startLibraryWatchersIfNeeded() {
+  if (libraryWatchersStarted || !libraryServicesAvailable()) return;
+  libraryWatchersStarted = true;
+
+  window.MLFirebase.watchLibrary((songs) => {
+    libraryCache = songs || {};
+    renderLibrarySongsList();
+    renderRecentList();       // recent-song names may need the library for display
+    renderCollectionsList();  // collection song names depend on the library too
+    renderPlaylistsList();
+  });
+  window.MLFirebase.watchCollections((collections) => {
+    collectionsCache = collections || {};
+    renderCollectionsList();
+    if (activeCollectionId) renderCollectionDetail(activeCollectionId);
+  });
+  window.MLFirebase.watchSetlists((playlists) => {
+    playlistsCache = playlists || {};
+    renderPlaylistsList();
+    if (activePlaylistId) renderPlaylistDetail(activePlaylistId);
+  });
+}
+
+/* ---------------- Modal open/close ---------------- */
+
+function openLibraryModal() {
+  if (!libraryServicesAvailable()) {
+    showToast('Configure & enable Firebase sync first to use the Cloud Library', 'error');
+    return;
+  }
+  startLibraryWatchersIfNeeded();
+  document.getElementById('library-modal-overlay').classList.add('open');
+  switchLibraryTab('songs');
+}
+
+function closeLibraryModal() {
+  document.getElementById('library-modal-overlay').classList.remove('open');
+}
+
+function closeLibraryModalOutside(e) {
+  if (e.target.id === 'library-modal-overlay') closeLibraryModal();
+}
+
+function switchLibraryTab(tab) {
+  document.querySelectorAll('.library-tab').forEach(el => el.classList.toggle('active', el.dataset.tab === tab));
+  document.querySelectorAll('.library-panel').forEach(el => el.classList.toggle('active', el.id === `library-panel-${tab}`));
+  if (tab === 'songs')       renderLibrarySongsList();
+  if (tab === 'collections') renderCollectionsList();
+  if (tab === 'playlists')   renderPlaylistsList();
+  if (tab === 'recent')      renderRecentList();
+}
+
+/* ---------------- Songs tab: list, search, favorite, import ---------------- */
+
+function formatTimestamp(ts) {
+  if (!ts) return '—';
+  try { return new Date(ts).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }); }
+  catch { return '—'; }
+}
+
+function renderLibrarySongsList() {
+  const container = document.getElementById('library-songs-list');
+  if (!container) return;
+
+  const results = libraryServicesAvailable()
+    ? window.MLFirebase.searchLibrary(librarySearchQuery)
+    : [];
+
+  if (!results.length) {
+    container.innerHTML = `<div class="library-empty">${librarySearchQuery ? 'No songs match your search.' : 'No songs yet. Import a .txt file to add your first cloud song.'}</div>`;
+    return;
+  }
+
+  container.innerHTML = '';
+  results
+    .sort((a, b) => (a.name || '').localeCompare(b.name || ''))
+    .forEach((song) => {
+      const isFav = libraryServicesAvailable() && window.MLFirebase.isFavorite(song.id);
+      const row = document.createElement('div');
+      row.className = 'library-row';
+      row.innerHTML = `
+        <button class="library-fav-btn ${isFav ? 'active' : ''}" title="Toggle favorite">${isFav ? '★' : '☆'}</button>
+        <span class="library-row-name">${song.name}</span>
+        <span class="library-row-meta">${formatTimestamp(song.updatedAt)}</span>
+        <div class="library-row-actions">
+          <button class="edit-btn">Edit</button>
+          <button class="open-btn">Open</button>
+        </div>`;
+      row.querySelector('.library-fav-btn').addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleLibraryFavorite(song.id);
+      });
+      row.querySelector('.library-row-name').addEventListener('click', () => openSongFromLibrary(song.id));
+      row.querySelector('.open-btn').addEventListener('click', () => openSongFromLibrary(song.id));
+      row.querySelector('.edit-btn').addEventListener('click', () => openEditorForSong(song.id));
+      container.appendChild(row);
+    });
+}
+
+function handleLibrarySearch(query) {
+  librarySearchQuery = query;
+  renderLibrarySongsList();
+}
+
+function toggleLibraryFavorite(songId) {
+  if (!libraryServicesAvailable()) return;
+  window.MLFirebase.toggleFavorite(songId);
+  renderLibrarySongsList(); // re-render immediately; PreferenceService already persisted the change
+}
+
+function handleImportTxt(inputEl) {
+  const file = inputEl.files && inputEl.files[0];
+  if (!file) return;
+  if (!libraryServicesAvailable()) {
+    showToast('Configure & enable Firebase sync first', 'error');
+    inputEl.value = '';
+    return;
+  }
+  window.MLFirebase.importLyricsFile(file)
+    .then(({ songName }) => {
+      showToast(`Imported "${songName}"`, 'success');
+      inputEl.value = '';
+    })
+    .catch((err) => {
+      showToast(`Import failed: ${err.message}`, 'error');
+      inputEl.value = '';
+    });
+}
+
+/* ---------------- Opening a cloud song on the main stage ---------------- */
+
+function openSongFromLibrary(songId) {
+  const song = libraryCache[songId];
+  if (!song) { showToast('Song not found in library', 'error'); return; }
+
+  // Reuses the EXISTING loadLyrics() unchanged — same page-parsing,
+  // same rendering, same fbPublish() call at the end (old sync system
+  // fires exactly as it already does for any other song).
+  loadLyrics({ id: songId, name: song.name }, song.text || '');
+
+  if (libraryServicesAvailable()) {
+    window.MLFirebase.addRecentSong(songId, song.name);
+    window.MLFirebase.setLastSong(songId);
+  }
+  closeLibraryModal();
+}
+
+/* ---------------- Lyrics Editor (with auto-save) ---------------- */
+
+function openEditorForSong(songId) {
+  const song = libraryCache[songId];
+  if (!song) { showToast('Song not found in library', 'error'); return; }
+
+  currentEditingSongId = songId;
+  document.getElementById('editor-song-title').textContent = `Edit — ${song.name}`;
+  document.getElementById('editor-textarea').value = song.text || '';
+  document.getElementById('editor-meta').textContent =
+    `Created: ${formatTimestamp(song.createdAt)}  •  Last updated: ${formatTimestamp(song.updatedAt)}`;
+  setEditorSaveStatus('saved', 'Saved');
+  document.getElementById('editor-modal-overlay').classList.add('open');
+}
+
+function closeEditorModal() {
+  document.getElementById('editor-modal-overlay').classList.remove('open');
+  currentEditingSongId = null;
+  clearTimeout(editorAutosaveTimer);
+}
+
+function closeEditorModalOutside(e) {
+  if (e.target.id === 'editor-modal-overlay') closeEditorModal();
+}
+
+function setEditorSaveStatus(state, label) {
+  const el = document.getElementById('editor-save-status');
+  if (!el) return;
+  el.className = `editor-save-status ${state}`;
+  el.textContent = label;
+}
+
+function handleEditorInput() {
+  if (!currentEditingSongId || !libraryServicesAvailable()) return;
+  setEditorSaveStatus('saving', 'Saving…');
+  clearTimeout(editorAutosaveTimer);
+  editorAutosaveTimer = setTimeout(() => {
+    const text = document.getElementById('editor-textarea').value;
+    window.MLFirebase.updateLyricsText(currentEditingSongId, text)
+      .then(() => setEditorSaveStatus('saved', 'Saved'))
+      .catch(() => setEditorSaveStatus('', 'Save failed — will retry on next edit'));
+  }, 1200); // debounced auto-save, 1.2s after the last keystroke
+}
+
+/* ---------------- Collections ---------------- */
+
+function renderCollectionsList() {
+  const container = document.getElementById('library-collections-list');
+  if (!container) return;
+  const entries = Object.entries(collectionsCache);
+  if (!entries.length) {
+    container.innerHTML = '<div class="library-empty">No collections yet.</div>';
+    return;
+  }
+  container.innerHTML = '';
+  entries.forEach(([id, col]) => {
+    const count = col.songIds ? Object.keys(col.songIds).length : 0;
+    const row = document.createElement('div');
+    row.className = 'library-row';
+    row.innerHTML = `
+      <span class="library-row-name" style="cursor:pointer;">${col.name}</span>
+      <span class="library-row-meta">${count} song${count === 1 ? '' : 's'}</span>
+      <div class="library-row-actions"><button class="del-btn">Delete</button></div>`;
+    row.querySelector('.library-row-name').addEventListener('click', () => openCollectionDetail(id));
+    row.querySelector('.del-btn').addEventListener('click', () => {
+      if (libraryServicesAvailable()) window.MLFirebase.deleteCollection(id);
+    });
+    container.appendChild(row);
+  });
+}
+
+function createNewCollection() {
+  const input = document.getElementById('new-collection-name');
+  const name = input.value.trim();
+  if (!name || !libraryServicesAvailable()) return;
+  window.MLFirebase.createCollection(name).then(() => { input.value = ''; });
+}
+
+function openCollectionDetail(collectionId) {
+  activeCollectionId = collectionId;
+  document.querySelector('#library-panel-collections .library-toolbar-row').style.display = 'none';
+  document.getElementById('library-collections-list').style.display = 'none';
+  document.getElementById('collection-detail-view').style.display = 'block';
+  renderCollectionDetail(collectionId);
+}
+
+function closeCollectionDetail() {
+  activeCollectionId = null;
+  document.querySelector('#library-panel-collections .library-toolbar-row').style.display = 'flex';
+  document.getElementById('library-collections-list').style.display = 'flex';
+  document.getElementById('collection-detail-view').style.display = 'none';
+}
+
+function renderCollectionDetail(collectionId) {
+  const col = collectionsCache[collectionId];
+  if (!col) return;
+  document.getElementById('collection-detail-title').textContent = col.name;
+  const container = document.getElementById('collection-detail-songs');
+  const songIds = col.songIds ? Object.keys(col.songIds) : [];
+
+  let html = '';
+  songIds.forEach((sid) => {
+    const song = libraryCache[sid];
+    html += `<div class="library-row"><span class="library-row-name">${song ? song.name : sid}</span>
+      <div class="library-row-actions"><button data-remove="${sid}">Remove</button></div></div>`;
+  });
+
+  const remaining = Object.entries(libraryCache).filter(([sid]) => !songIds.includes(sid));
+  html += `<div class="library-toolbar-row" style="margin-top:10px;">
+      <select id="collection-add-select" class="library-search">
+        <option value="">Add a song…</option>
+        ${remaining.map(([sid, s]) => `<option value="${sid}">${s.name}</option>`).join('')}
+      </select>
+      <button class="btn-primary" style="margin:0;" id="collection-add-btn">Add</button>
+    </div>`;
+
+  container.innerHTML = html || '<div class="library-empty">No songs in this collection yet.</div>' + html;
+
+  container.querySelectorAll('[data-remove]').forEach((btn) => {
+    btn.addEventListener('click', () => window.MLFirebase.removeSongFromCollection(collectionId, btn.dataset.remove));
+  });
+  const addBtn = document.getElementById('collection-add-btn');
+  if (addBtn) {
+    addBtn.addEventListener('click', () => {
+      const sel = document.getElementById('collection-add-select');
+      if (sel.value) window.MLFirebase.addSongToCollection(collectionId, sel.value);
+    });
+  }
+}
+
+/* ---------------- Playlists (UI name for library.js's Setlists) ---------------- */
+
+function renderPlaylistsList() {
+  const container = document.getElementById('library-playlists-list');
+  if (!container) return;
+  const entries = Object.entries(playlistsCache);
+  if (!entries.length) {
+    container.innerHTML = '<div class="library-empty">No playlists yet.</div>';
+    return;
+  }
+  container.innerHTML = '';
+  entries.forEach(([id, pl]) => {
+    const count = Array.isArray(pl.songIds) ? pl.songIds.length : 0;
+    const row = document.createElement('div');
+    row.className = 'library-row';
+    row.innerHTML = `
+      <span class="library-row-name" style="cursor:pointer;">${pl.name}</span>
+      <span class="library-row-meta">${count} song${count === 1 ? '' : 's'}</span>
+      <div class="library-row-actions"><button class="del-btn">Delete</button></div>`;
+    row.querySelector('.library-row-name').addEventListener('click', () => openPlaylistDetail(id));
+    row.querySelector('.del-btn').addEventListener('click', () => {
+      if (libraryServicesAvailable()) window.MLFirebase.deleteSetlist(id);
+    });
+    container.appendChild(row);
+  });
+}
+
+function createNewPlaylist() {
+  const input = document.getElementById('new-playlist-name');
+  const name = input.value.trim();
+  if (!name || !libraryServicesAvailable()) return;
+  window.MLFirebase.createSetlist(name, []).then(() => { input.value = ''; });
+}
+
+function openPlaylistDetail(playlistId) {
+  activePlaylistId = playlistId;
+  document.querySelector('#library-panel-playlists .library-toolbar-row').style.display = 'none';
+  document.getElementById('library-playlists-list').style.display = 'none';
+  document.getElementById('playlist-detail-view').style.display = 'block';
+  renderPlaylistDetail(playlistId);
+}
+
+function closePlaylistDetail() {
+  activePlaylistId = null;
+  document.querySelector('#library-panel-playlists .library-toolbar-row').style.display = 'flex';
+  document.getElementById('library-playlists-list').style.display = 'flex';
+  document.getElementById('playlist-detail-view').style.display = 'none';
+}
+
+function renderPlaylistDetail(playlistId) {
+  const pl = playlistsCache[playlistId];
+  if (!pl) return;
+  document.getElementById('playlist-detail-title').textContent = pl.name;
+  const container = document.getElementById('playlist-detail-songs');
+  const songIds = Array.isArray(pl.songIds) ? pl.songIds : [];
+
+  let html = '';
+  songIds.forEach((sid, i) => {
+    const song = libraryCache[sid];
+    html += `<div class="library-row">
+      <span class="library-row-name">${song ? song.name : sid}</span>
+      <div class="library-row-actions">
+        <button class="reorder-btn" data-up="${i}" ${i === 0 ? 'disabled' : ''}>↑</button>
+        <button class="reorder-btn" data-down="${i}" ${i === songIds.length - 1 ? 'disabled' : ''}>↓</button>
+        <button data-remove="${i}">Remove</button>
+      </div></div>`;
+  });
+
+  const remaining = Object.entries(libraryCache).filter(([sid]) => !songIds.includes(sid));
+  html += `<div class="library-toolbar-row" style="margin-top:10px;">
+      <select id="playlist-add-select" class="library-search">
+        <option value="">Add a song…</option>
+        ${remaining.map(([sid, s]) => `<option value="${sid}">${s.name}</option>`).join('')}
+      </select>
+      <button class="btn-primary" style="margin:0;" id="playlist-add-btn">Add</button>
+    </div>`;
+
+  container.innerHTML = html || '<div class="library-empty">No songs in this playlist yet.</div>' + html;
+
+  container.querySelectorAll('[data-remove]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const idx = parseInt(btn.dataset.remove, 10);
+      const next = songIds.slice(); next.splice(idx, 1);
+      window.MLFirebase.setSetlistSongs(playlistId, next);
+    });
+  });
+  container.querySelectorAll('[data-up]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const idx = parseInt(btn.dataset.up, 10);
+      const next = songIds.slice(); [next[idx - 1], next[idx]] = [next[idx], next[idx - 1]];
+      window.MLFirebase.setSetlistSongs(playlistId, next);
+    });
+  });
+  container.querySelectorAll('[data-down]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const idx = parseInt(btn.dataset.down, 10);
+      const next = songIds.slice(); [next[idx + 1], next[idx]] = [next[idx], next[idx + 1]];
+      window.MLFirebase.setSetlistSongs(playlistId, next);
+    });
+  });
+  const addBtn = document.getElementById('playlist-add-btn');
+  if (addBtn) {
+    addBtn.addEventListener('click', () => {
+      const sel = document.getElementById('playlist-add-select');
+      if (sel.value) window.MLFirebase.setSetlistSongs(playlistId, [...songIds, sel.value]);
+    });
+  }
+}
+
+/**
+ * Starts playing a playlist: opens its first song on stage and shows a
+ * small queue bar (Prev/Next within the playlist) in the bottom bar.
+ * This is entirely new, separate logic — it does NOT hook into or
+ * modify the existing navigate()/renderPage() page-turning functions,
+ * which remain page-within-a-song only, exactly as before.
+ */
+function playCurrentPlaylist() {
+  const pl = playlistsCache[activePlaylistId];
+  if (!pl || !Array.isArray(pl.songIds) || !pl.songIds.length) {
+    showToast('This playlist has no songs yet', 'error');
+    return;
+  }
+  activePlaylistQueue = { id: activePlaylistId, name: pl.name, songIds: pl.songIds, index: 0 };
+  closeLibraryModal();
+  playQueueIndex(0);
+  showPlaylistQueueBar();
+}
+
+function playQueueIndex(index) {
+  if (!activePlaylistQueue) return;
+  const songIds = activePlaylistQueue.songIds;
+  if (index < 0 || index >= songIds.length) return;
+  activePlaylistQueue.index = index;
+  const songId = songIds[index];
+  const song = libraryCache[songId];
+  if (song) loadLyrics({ id: songId, name: song.name }, song.text || '');
+  updatePlaylistQueueBar();
+}
+
+function playlistQueueNext() { if (activePlaylistQueue) playQueueIndex(activePlaylistQueue.index + 1); }
+function playlistQueuePrev() { if (activePlaylistQueue) playQueueIndex(activePlaylistQueue.index - 1); }
+
+function stopPlaylistQueue() {
+  activePlaylistQueue = null;
+  const bar = document.getElementById('playlist-queue-bar');
+  if (bar) bar.remove();
+}
+
+function showPlaylistQueueBar() {
+  let bar = document.getElementById('playlist-queue-bar');
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'playlist-queue-bar';
+    bar.style.cssText = 'display:flex;align-items:center;gap:10px;padding:8px 24px;border-top:1px solid var(--border);font-size:0.78rem;color:var(--text-secondary);';
+    bar.innerHTML = `
+      <button class="sm-btn" id="pq-prev" style="width:auto;padding:0 10px;">‹ Prev</button>
+      <span id="pq-label" style="flex:1;"></span>
+      <button class="sm-btn" id="pq-next" style="width:auto;padding:0 10px;">Next ›</button>
+      <button class="sm-btn" id="pq-close" style="width:auto;padding:0 10px;">✕</button>`;
+    document.getElementById('bottom-bar').appendChild(bar);
+    bar.querySelector('#pq-prev').addEventListener('click', playlistQueuePrev);
+    bar.querySelector('#pq-next').addEventListener('click', playlistQueueNext);
+    bar.querySelector('#pq-close').addEventListener('click', stopPlaylistQueue);
+  }
+  updatePlaylistQueueBar();
+}
+
+function updatePlaylistQueueBar() {
+  const label = document.getElementById('pq-label');
+  if (!label || !activePlaylistQueue) return;
+  label.textContent = `Playlist: ${activePlaylistQueue.name} (${activePlaylistQueue.index + 1}/${activePlaylistQueue.songIds.length})`;
+  const prevBtn = document.getElementById('pq-prev');
+  const nextBtn = document.getElementById('pq-next');
+  if (prevBtn) prevBtn.disabled = activePlaylistQueue.index === 0;
+  if (nextBtn) nextBtn.disabled = activePlaylistQueue.index === activePlaylistQueue.songIds.length - 1;
+}
+
+/* ---------------- Recent Songs tab ---------------- */
+
+function renderRecentList() {
+  const container = document.getElementById('library-recent-list');
+  if (!container) return;
+  const recents = libraryServicesAvailable() ? window.MLFirebase.getRecentSongs() : [];
+  if (!recents.length) {
+    container.innerHTML = '<div class="library-empty">No recently opened songs yet.</div>';
+    return;
+  }
+  container.innerHTML = '';
+  recents.forEach((r) => {
+    const row = document.createElement('div');
+    row.className = 'library-row';
+    row.innerHTML = `<span class="library-row-name" style="cursor:pointer;">${r.name}</span>
+      <span class="library-row-meta">${formatTimestamp(r.openedAt)}</span>`;
+    row.querySelector('.library-row-name').addEventListener('click', () => openSongFromLibrary(r.songId));
+    container.appendChild(row);
+  });
+}
+
+/* ---------------- Better Fullscreen ----------------
+   Auto-collapses the sidebar on entering fullscreen (maximizing the
+   lyrics viewer for stage use) and restores its prior state on exit.
+   Registered as a SEPARATE fullscreenchange listener from the existing
+   updateFullscreenBtn one — does not modify that listener or function.
+   ---------------------------------------------------------------- */
+let preFullscreenSidebarCollapsed = null;
+
+function initFullscreenAutoCollapse() {
+  const handler = () => {
+    const isFull = !!(document.fullscreenElement || document.webkitFullscreenElement);
+    const app = document.getElementById('app');
+    if (!app) return;
+
+    if (isFull) {
+      preFullscreenSidebarCollapsed = app.classList.contains('sidebar-collapsed');
+      if (!preFullscreenSidebarCollapsed) {
+        app.classList.add('sidebar-collapsed');
+        updateSidebarCollapseBtn(true);
+      }
+    } else if (preFullscreenSidebarCollapsed !== null) {
+      if (!preFullscreenSidebarCollapsed) {
+        app.classList.remove('sidebar-collapsed');
+        updateSidebarCollapseBtn(false);
+      }
+      preFullscreenSidebarCollapsed = null;
+    }
+  };
+  document.addEventListener('fullscreenchange', handler);
+  document.addEventListener('webkitfullscreenchange', handler);
+}

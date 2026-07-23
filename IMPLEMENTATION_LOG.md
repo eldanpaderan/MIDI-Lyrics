@@ -281,3 +281,90 @@ Requested: 4-tier session roles (Host/Presenter/Viewer/Admin), realtime sync ext
 **Known Issues (unchanged, Critical/Medium — not addressed this phase):** All 3 Critical findings (C1–C3) and all 5 Medium findings from Phase 6 remain open, exactly as documented there. Awaiting your direction on which tier to address next.
 
 **Next Phase:** Awaiting approval/direction — Critical findings (C1–C3) are the most consequential remaining items, but per your explicit instruction this phase stopped at High only.
+
+---
+
+## Phase 8 — Production Cleanup (Safe Items Only; Old-System Removal Postponed)
+
+**Date:** 2026-07-20
+
+**Phase:** Production cleanup pass. Before starting, flagged that "remove old Firebase/session/preference implementation" would strip the app's only currently-working sync feature (the old system is not yet superseded by any wired UI for the new `services/firebase/*` layer) — you confirmed: do the safe cleanup now, postpone old-system removal until the new UI is wired.
+
+**Files Modified:** None in the delivered repo. One sandbox-only artifact (`index.html.bak-original`, a local backup I made for my own diffing during Phase 1, never delivered to you or part of your actual repo) was deleted from my working copy — it required no action on your end.
+
+**Findings (verified by direct inspection, not assumption):**
+- **Console.log statements:** None found in actual code. One `console.log(...)` appears only inside a docblock comment (an example usage snippet) in `browser-bridge.js` — not executable debug code, left as-is.
+- **Console.warn/console.error:** 6 found across `app.js`/`browser-bridge.js`/`preference.js`/`realtime.js` — all are intentional production error/permission-denial handling (e.g., "Only host/admin/presenter devices may publish..."), not temporary debugging code. Not removed.
+- **TODO/FIXME/XXX comments:** None found anywhere in the repo.
+- **Dead/unused functions:** None found. Verified every top-level function in `app.js` (51 functions) is called somewhere, including `onMIDIMessage` (initially flagged by an automated heuristic as a false positive — it's assigned as a callback reference via `input.onmidimessage = onMIDIMessage`, not called with `()` syntax, which the heuristic missed).
+- **Unused variables:** None found.
+- **Unused CSS:** None found. Re-verified all 53 CSS class selectors in `styles.css` against actual usage in `index.html` and `app.js` (including template-literal-generated classes) — zero unused, consistent with the same check performed in Phase 6.
+- **Duplicate listeners (literal double-firing):** None found. Every `addEventListener` call site was inspected; no listener is registered more than once for the same element/event. There remain two separate `keydown` listeners handling non-overlapping keys — this is the same Medium-severity finding from the Phase 6 audit (M3, an organizational/maintainability note, not an actual duplicate-firing bug) and was left untouched, since Medium findings were not part of this cleanup's approved scope.
+
+**"Only one X exists" verification — reported honestly, not overstated:**
+- **Firebase initialization:** ❌ Still two (old named-app `connectFirebase()` in `app.js`, new singleton in `firebase.js`) — this is audit finding C1, unresolved because old-system removal was postponed by your decision this phase.
+- **Session Manager:** ❌ Still two — `app.js`'s `state.mode`/single hardcoded `FIREBASE_DB_PATH` model coexists with the new role-based multi-session `session.js`.
+- **Preference Service:** ⚠️ Partially — for theme/sidebar/font/autofit specifically, `services/firebase/preference.js` is now the sole source of truth (fixed in Phase 7/H4). `app.js`'s `mode`/MIDI-mapping/`fbEnabled` persistence remains separate by design — these aren't "preferences" in PreferenceService's defined scope (they're session-mode/hardware-mapping/feature-flag state), so this wasn't touched.
+- **Realtime Service:** ❌ Still two — `app.js`'s `fbPublish()`/`fbStartListening()`/`handleFollowerUpdate()` remains a fully separate system from `realtime.js`.
+
+None of the four "only one" targets can be fully true until the old system is removed, which requires the UI-wiring phase to happen first (or simultaneously) — reported here plainly rather than claiming false compliance.
+
+**Runtime error verification (static, no live browser available in this environment):**
+- `node --check`/`node --input-type=module --check` on all 9 JS files — all pass, no syntax errors.
+- Full cross-check of every `getElementById()` target in `app.js` against `id` attributes in `index.html` — all resolve.
+- Full cross-check of every `onclick=`/`onchange=` handler referenced in `index.html` against function declarations in `app.js` — all resolve.
+- **Caveat:** these are static checks, not a substitute for an actual browser load. Recommend a manual smoke test in a real browser (desktop + at least one mobile device) before considering this production-verified.
+
+**Reason:** Perform requested cleanup items that could be done safely without removing working functionality or touching previously out-of-scope Critical/Medium findings; report transparently on the items that could not be completed due to the postponed old-system removal.
+
+**Known Issues (unchanged):** All 3 Critical findings (C1–C3) and all 5 Medium findings from Phase 6 remain open. The "only one X" verifications above will only fully pass once the old Firebase/session/preference/realtime-sync code in `app.js` is removed — which requires the new services to be wired into the UI first, so the app doesn't lose its only working sync feature in the process.
+
+**Next Phase:** Awaiting your direction — most likely candidates are (a) the long-deferred UI-wiring phase (Library browser, Setlist builder, role-aware toolbar, session ID input) that would let the old system finally be retired safely, or (b) addressing the 3 Critical audit findings (C1–C3) directly within the existing old/new dual-system setup.
+
+---
+
+## Phase 9 — Cloud Song Library UI (Feature Development)
+
+**Date:** 2026-07-20
+
+**Phase:** The long-deferred UI-wiring phase. Implements: Song Library, Favorites, Collections, Playlists, Recent Songs, Search, Song Metadata, Auto-save, Lyrics Editor, Import .txt, Cloud Lyrics, Auto-fit Lyrics (verified already present, unchanged), Better Fullscreen, Touch Gestures (verified already present, unchanged), and Android/Tablet/Desktop responsive treatment for all new UI. MIDI playback and the existing Leader/Follower synchronization were not touched.
+
+**Two naming/scope decisions made and stated up front (not silently assumed):**
+1. **"Playlist"** is used as the UI-facing label for `services/firebase/library.js`'s existing Setlist functions (`createSetlist`/`setSetlistSongs`/`watchSetlists`/etc.) — resolving the Setlist/Collection/Playlist terminology overlap flagged in the Phase 6 audit by aliasing in the UI layer only, without renaming backend functions (which would have meant touching already-shipped, working service code for no functional benefit).
+2. **"Cloud Lyrics"** is implemented as a new, parallel Library panel backed by Firebase — it does not replace the existing GitHub-folder-based setlist (`loadSongList()`/`renderSetlist()`), per your explicit "keep synchronization untouched" / "do not redesign architecture" instructions and your Phase-8 decision to postpone old-system removal until new UI exists. Both song-browsing systems now coexist side by side.
+
+**Files Modified:**
+- `index.html` — added one new toolbar button ("Library"). Added two new modals: a tabbed Library modal (Songs / Collections / Playlists / Recent) and a Lyrics Editor modal. No existing markup, IDs, or `onclick` bindings were changed.
+- `styles.css` — appended a new section (Library modal, tabs, song/collection/playlist rows, editor textarea, responsive rules for phone/tablet/desktop). No existing rules were modified.
+- `app.js` — appended a new "PHASE 9: CLOUD SONG LIBRARY UI" section (~500 lines) containing all new functions. Two single-line additions to the existing additive init block (`initLibraryUI()`, `initFullscreenAutoCollapse()` calls) — no other existing line was changed.
+
+**Feature-by-feature implementation notes:**
+- **Song Library / Search / Song Metadata:** `renderLibrarySongsList()` renders from `window.MLFirebase.searchLibrary()` (live-filtered by the search box via `handleLibrarySearch()`), showing name + last-updated date per row.
+- **Favorites:** star toggle per song row, wired to `toggleFavorite()`/`isFavorite()` — already fixed for cross-device sync in Phase 7 (H4)/needs the Phase-6-flagged Critical C3 fix (favorites/recent sync gap) to fully sync across devices; the UI itself is correct regardless.
+- **Collections:** create/list/delete, detail view showing member songs with add/remove — wired directly to the existing `library.js` Collections API, unchanged.
+- **Playlists:** create/list/delete, detail view with ordered songs, up/down reorder buttons (no drag-and-drop library added, to avoid a new dependency), add/remove songs, and a "▶ Play All" action. Playing a playlist opens the first song via the existing `loadLyrics()` and shows a new, small "Playlist: Name (2/5)" bar in the bottom bar with Prev/Next/Close — implemented as entirely new functions (`playQueueIndex`, `playlistQueueNext/Prev`, `showPlaylistQueueBar`) that do **not** hook into or modify `navigate()`/`renderPage()`, which remain page-within-a-song only, exactly as before.
+- **Recent Songs:** read-only list from `getRecentSongs()`, click to reopen.
+- **Auto-save / Lyrics Editor:** a textarea per song, debounced auto-save (1.2s after the last keystroke) calling `updateLyricsText()`, with a visible "Saving…/Saved" status indicator. Metadata (created/updated dates) shown above the editor.
+- **Import .txt:** file picker wired to the existing `importLyricsFile()` service function (already built in Phase 3) — no changes needed there.
+- **Cloud Lyrics:** opening a library song calls the **existing, unmodified** `loadLyrics(song, text)` function — same page-parsing, same rendering, same `fbPublish()` call at the end (so if old Firebase sync happens to be enabled, opening a cloud song naturally publishes through the existing Leader/Follower mechanism too, as a side effect, not a special case).
+- **Auto-fit Lyrics:** already implemented (Phase 1/4) — verified still functional, no changes made; not re-implemented.
+- **Better Fullscreen:** `initFullscreenAutoCollapse()` is a new, separate `fullscreenchange` listener (registered alongside, not replacing, the existing `updateFullscreenBtn` listener) that auto-collapses the sidebar on entering fullscreen (maximizing the lyrics viewer) and restores its prior state on exit.
+- **Touch Gestures:** already implemented (pre-existing swipe/tap on `#lyric-stage`) — verified still functional, no changes made. New Library UI rows use larger touch-friendly padding on phone breakpoints (see responsive notes below).
+- **Android / Tablet / Desktop improvements:** the new Library/Editor modals follow the same responsive breakpoint convention already established in `styles.css` (≤768px: full-screen modal, matching the existing mobile-drawer pattern; 769–1024px: 90vw tablet sizing; ≥1200px: fixed max-width desktop sizing).
+
+**Architecture Decisions:**
+- The Library watchers (`watchLibrary`/`watchCollections`/`watchSetlists`) are started lazily, the first time the Library modal is opened (`startLibraryWatchersIfNeeded()`), not at page load — avoids holding open Realtime Database listeners for a panel the person hasn't opened, and avoids requiring Firebase to be configured just to load the page.
+- If Firebase isn't configured/enabled, `openLibraryModal()` shows a toast and does not open the modal, rather than opening to a broken/empty state.
+- No existing function was modified to accommodate this phase — every integration point is either a brand-new function or a single new line added to an already-additive init block from a previous phase.
+
+**Verification performed:**
+- `node --check`/`node --input-type=module --check` on all 9 JS files — all pass.
+- Targeted hash comparison of 9 core functions (`renderPage`, `navigate`, `fbPublish`, `fbStartListening`, `handleFollowerUpdate`, `onMIDIMessage`, `connectFirebase`, `initMIDI`, **and now also `loadLyrics`**, since this phase calls it directly) — all remain byte-identical to the original extraction.
+- Full `getElementById`/`onclick`/`onchange`/`oninput` cross-check between `app.js` and `index.html`, including a manual pass confirming the handful of "missing" IDs flagged by the automated check are dynamically created via `innerHTML`/`createElement` immediately before being queried (not actual bugs).
+- Confirmed zero duplicate `id` attributes anywhere in `index.html`.
+- Confirmed every new `window.MLFirebase.*` call used in `app.js` resolves to a real exported function in `services/firebase/*.js` (including two initial false positives — `createCollection`/`createSetlist` — which use `export async function`, a pattern my first grep pass didn't match; manually confirmed both exist).
+- **Caveat:** static verification only, no live browser available in this environment. Recommend a manual smoke test (desktop + Android + iPad) before considering this production-verified, especially for: the playlist queue bar's visual fit in the bottom bar across breakpoints, and the Collections/Playlists "add song" `<select>` dropdowns on small screens.
+
+**Known Issues (carried over, not addressed this phase):** All 3 Critical findings (C1–C3) and all 5 Medium findings from Phase 6 remain open — in particular, C3 (Favorites/Recent Songs not syncing cross-device) directly affects this phase's Favorites/Recent tabs: they work correctly per-device, but won't yet reflect changes made on a different signed-in device until C3 is fixed. The old GitHub-folder song system and old Firebase sync system in `app.js` remain fully intact and unremoved, per your Phase-8 decision — "only one Song Library/Session Manager/etc." still does not fully hold, now with an added dimension (two ways to browse/open songs: the old sidebar setlist and the new Library modal).
+
+**Next Phase:** Awaiting your direction — candidates include: addressing Critical findings C1–C3 (C3 in particular now has direct UI-visible impact via this phase's Favorites/Recent tabs), or beginning the old-system retirement now that the new Library UI exists as a real replacement path.
