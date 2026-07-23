@@ -80,3 +80,29 @@ function bootstrapFirebaseServices() {
 }
 
 bootstrapFirebaseServices();
+
+/**
+ * --- Fix for audit finding H2 (script execution order) ------------
+ *
+ * This file is loaded as <script type="module">, which executes
+ * deferred (after the document is parsed) — but app.js is a classic,
+ * non-deferred <script>, which executes immediately when the parser
+ * reaches it. Even though this file's <script> tag appears earlier in
+ * index.html, app.js can actually run BEFORE this file does. Nothing
+ * in app.js currently reads window.MLFirebase synchronously at the
+ * top level, so this has not caused a visible bug yet — but any future
+ * code must not assume window.MLFirebase is ready simply because it
+ * appears later in the DOM/script order.
+ *
+ * Fix: dispatch a dedicated ready event once MLFirebase is attached and
+ * bootstrap has been attempted, so future code can listen for it
+ * instead of relying on script order:
+ *
+ *   window.addEventListener('MLFirebaseReady', () => { ... });
+ *
+ * If window.MLFirebase is already needed synchronously somewhere by
+ * the time this runs, checking `window.MLFirebaseReadyFired === true`
+ * (set below) also works as a synchronous readiness check.
+ * ------------------------------------------------------------------ */
+window.MLFirebaseReadyFired = true;
+window.dispatchEvent(new CustomEvent('MLFirebaseReady', { detail: MLFirebase }));

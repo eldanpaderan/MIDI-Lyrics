@@ -146,6 +146,16 @@ export async function joinSession(sessionId, deviceInfo = {}, requestedRole = RO
 
 async function registerDevice(sessionId, deviceRole, deviceInfo) {
   const user = getCurrentUser();
+
+  // Fix for audit finding H3: if this device is already attached to a
+  // different session (joinSession()/createSession() called again without
+  // leaveSession() first), the previous device ref's onDisconnect() must be
+  // cancelled here — otherwise it stays armed against the OLD session and
+  // can fire an unexpected device-removal there later.
+  if (deviceRef) {
+    deviceRef.onDisconnect().cancel();
+  }
+
   const ref = db().ref(`sessions/${sessionId}/devices/${user.uid}`);
   await ref.set({
     role: deviceRole,

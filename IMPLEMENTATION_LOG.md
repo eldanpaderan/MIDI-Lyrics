@@ -217,3 +217,67 @@ Requested: 4-tier session roles (Host/Presenter/Viewer/Admin), realtime sync ext
 **Produced (in chat, not as repo files):** Version 2 Roadmap (unify PreferenceService, UI wiring, accessibility pass, consolidate duplicated parsing, deprecate GitHub-folder song loading, add RTDB security rules, real-device testing), Version 3 Roadmap (automated tests, library pagination, debounced search, multi-setlist scheduling, real user accounts, offline conflict resolution), and future migration guidance for Vite/TypeScript/React — each framed as conditional on future need, not recommended immediately given the current app's scope.
 
 **Next Phase:** Awaiting your direction on which Version 2 item(s) to prioritize — most consequential candidates are (a) unifying PreferenceService to close the state-duplication bug found in this review, and (b) beginning the UI-wiring phase already proposed in Phases 3–4.
+
+---
+
+## Phase 6 — Production-Level Repository Audit (No Code Changes)
+
+**Date:** 2026-07-20
+
+**Phase:** Complete repository audit performed as a production-readiness review — every module, folder, service, Firebase usage, session management, PreferenceService, UI, synchronization, performance, security, and architecture pattern was inspected directly (not from memory). No code was modified, no features added, no refactors performed, per explicit instruction. Findings are ranked Critical/High/Medium/Low with file references and fix recommendations; no fixes were implemented this phase.
+
+**Critical (3):**
+1. `services/firebase/firebase.js` — `initFirebase()`'s app-detection guard (`window.firebase.apps.length ? window.firebase.app() : ...`) will throw if the old Phase-1 named-app Firebase system (`app.js`'s `connectFirebase()`) has already connected, since `window.firebase.app()` fetches the default/unnamed app specifically, which won't exist yet.
+2. `services/firebase/realtime.js` — `lastKnownPlaybackState`/`lastKnownDisplayState` diffing caches are module-level singletons, not scoped per session ID, and are never reset on `leaveSession()`/`joinSession()`. Stale values from a previous session can cause a genuine state change in a new session to be silently skipped as a "no-op" write.
+3. `services/firebase/preference.js` — `initPreferenceSync()` only watches `users/{uid}/preferences`; it never watches `users/{uid}/favorites` or `users/{uid}/recentSongs`, even though `toggleFavorite()`/`addRecentSong()` write to those separate paths. Favorites/Recent Songs therefore do not actually sync across devices, contradicting the module's own documented behavior.
+
+**High (4):**
+1. `services/firebase/library.js` — `addOrUpdateSong()` uses a read-then-full-`.set()` pattern (not a transaction or merge `.update()`), creating a race condition risk if two devices import/edit the same song concurrently.
+2. `index.html` — the `type="module"` bridge script is placed before the classic `app.js` in markup, but module scripts execute deferred (after parsing) while classic scripts execute immediately when encountered — meaning `app.js` actually runs before `browser-bridge.js`, contrary to what the script order visually suggests. Not currently breaking anything, but a landmine for the next UI-wiring phase, which will assume `window.MLFirebase` is ready at `DOMContentLoaded`.
+3. `services/firebase/session.js` — switching sessions via `joinSession()` without first calling `leaveSession()` leaves the previous session's `onDisconnect().remove()` armed and uncancelled, risking an orphaned presence-removal operation against the wrong session.
+4. `app.js` + `services/firebase/preference.js` — confirmed again (previously flagged in the Phase 5 review): theme/sidebar/font/autofit state is maintained by two separate, non-communicating systems.
+
+**Medium (5):** `loadSongList()` lacks a re-entrancy guard (rapid double-click race); `index.html.bak-original` (54KB dead backup file) still sits in the working tree; two separate `keydown` listeners in `app.js` split related concerns across the file; `showToast()` is a 68-line function mixing multiple responsibilities; `browser-bridge.js` mixes window-exposure and bootstrap-policy concerns in one file.
+
+**Low (3):** `library.js` and `session.js` are each accumulating multiple domains (songs+collections+setlists; roles+presence+reconnect+device-mgmt) and are candidates for splitting if they keep growing; "Collection" vs. "Setlist" vs. "Playlist" terminology overlap (flagged since Phase 5) remains unresolved; no documented/enforced import-direction convention exists yet to guard against future circular imports between the six services files (none currently exist — verified directly).
+
+**Verification method:** Every finding above was confirmed by direct inspection of the actual file contents (not assumption) — including a full CSS-class usage cross-check (styles.css classes against `index.html` and `app.js`, including template-literal-generated class names) which found **zero genuinely unused CSS classes**, and a full function-size ranking of `app.js` which found no function exceeding ~70 lines.
+
+**Next Phase:** Awaiting your approval and direction on which severity tier to address first. No changes have been made.
+
+---
+
+## Phase 7 — Fix High-Priority Audit Findings (H1–H4)
+
+**Date:** 2026-07-20
+
+**Phase:** Fix only the 4 High-priority findings from the approved Phase 6 Repository Audit. Critical and Medium findings intentionally left untouched, per your instruction. No features added, no redesign, Firebase architecture (data shapes, session model, role model) left unchanged.
+
+**Files Modified:**
+- `services/firebase/library.js` (H1) — `addOrUpdateSong()` rewritten from a read-then-full-`.set()` pattern to an atomic `ref.transaction()`. The transaction function receives the freshest server-side value on each retry the SDK performs, preventing two concurrent imports/edits of the same `songId` from clobbering each other. Preserves the exact same preserved-field behavior (`createdAt`/`addedBy` kept from the existing value on updates) and the exact same return value (`songId`).
+- `services/firebase/browser-bridge.js` (H2) — added a `MLFirebaseReady` custom event (`window.dispatchEvent(new CustomEvent('MLFirebaseReady', { detail: MLFirebase }))`) plus a `window.MLFirebaseReadyFired` flag, dispatched once `window.MLFirebase` is attached and bootstrap has been attempted. Does not change any existing script's load/execution order (no `defer` added to `app.js`, to avoid unintended timing side effects on unrelated code) — instead gives future code a reliable hook to depend on instead of assuming script-tag order implies execution order.
+- `services/firebase/session.js` (H3) — `registerDevice()` now calls `deviceRef.onDisconnect().cancel()` on the *previous* device ref (if one exists) before registering the new one. Prevents an orphaned `onDisconnect().remove()` from a previous session firing against the wrong session if `joinSession()`/`createSession()` is called again without first calling `leaveSession()`.
+- `services/firebase/preference.js` (H4, part 1) — added `autoFit: false` to `DEFAULTS`, completing the settings model referenced by the audit's H4 finding (theme/sidebar/font were already modeled; auto-fit was not).
+- `app.js` (H4, part 2) — added two small delegation helpers, `getSyncedPref(key, fallback)` / `setSyncedPref(key, value)`, which read/write through `window.MLFirebase.getPreferences()`/`setPreference()` when the services bridge is available, falling back to safe in-memory defaults (never a second `localStorage` key) if it isn't. Rewired `initTheme()`/`setTheme()`, `initSidebarCollapse()`/`toggleSidebarCollapse()`, `initAutoFit()`/`toggleAutoFit()`, and font-size persistence (`changeFontSize()` + a new `loadFontSizeFromPreferences()`, called from `loadLocalPrefs()`) to go through these helpers instead of their own separate `mlr_theme` / `mlr_sidebar_collapsed` / `mlr_autofit` / `mlr_fontSize` localStorage keys, which are now fully removed. Font size required an index↔label conversion (`state.fontSize` is a numeric index into `FONT_SIZES`; PreferenceService stores the label string, e.g. `'M'`) — handled in `changeFontSize()`/`loadFontSizeFromPreferences()`. `saveLocalPrefs()`/`loadLocalPrefs()` still handle `mode`/`midiNext`/`midiPrev`/`fbEnabled` exactly as before — those were not part of the H4 finding and were left untouched.
+- `docs/IMPLEMENTATION_LOG.md` — this entry.
+
+**Files NOT modified (Critical/Medium findings, per instruction):** `firebase.js` (C1), `realtime.js`'s session-scoped diff caches (C2), `preference.js`'s favorites/recentSongs sync gap (C3), and all 5 Medium findings (`loadSongList()` re-entrancy, `index.html.bak-original`, the two `keydown` listeners, `showToast()` size, `browser-bridge.js`'s mixed responsibilities) remain exactly as documented in the Phase 6 audit — none of these were touched.
+
+**Reason:** Fix only the High tier of the previously approved, ranked audit, without expanding scope into Critical or Medium findings, new features, or architectural redesign.
+
+**Architecture Decisions:**
+- **H1** uses a Firebase transaction rather than introducing any new concurrency-control mechanism of our own — this is the standard Realtime Database pattern for read-modify-write safety and requires no architectural change.
+- **H2** deliberately avoids adding `defer` to `app.js`'s script tag, since that could shift the timing of other classic-script behavior in ways outside this fix's scope (explicitly flagged as a risk in the original audit's own recommendation). The event-based fix is additive and zero-risk to existing behavior.
+- **H4** was implemented carefully to avoid becoming a "redesign": `saveLocalPrefs()`/`loadLocalPrefs()` continue to exist and handle the settings that were never part of the audit finding (mode, MIDI mappings, Firebase-enabled flag) exactly as before. Only the 4 specifically-named duplicated settings (theme, sidebar, font, auto-fit) were rewired, and only to remove the duplication — no new UI, no new user-facing behavior beyond what the audit itself predicted as the natural consequence of the fix (these settings will now actually sync across devices once Firebase sync is enabled with a signed-in user, which is what "PreferenceService is the single source of truth" was always supposed to mean).
+- The `getSyncedPref`/`setSyncedPref` fallback path (safe in-memory defaults, not a second localStorage key) was a deliberate choice to guarantee this fix cannot silently reintroduce the exact duplication bug it's meant to remove, even in a degraded scenario where `services/firebase/browser-bridge.js` fails to load.
+
+**Verification performed:**
+- `node --check`/`node --input-type=module --check` on all 9 JS files — all pass.
+- Targeted hash comparison (not a full-file diff, since this phase intentionally touches `loadLocalPrefs`/`saveLocalPrefs`/font-size functions) confirmed 8 core untouched functions — `renderPage`, `navigate`, `fbPublish`, `fbStartListening`, `handleFollowerUpdate`, `onMIDIMessage`, `connectFirebase`, `initMIDI` — remain byte-identical to the original extraction.
+- Confirmed zero remaining code references to the removed `mlr_theme`/`mlr_sidebar_collapsed`/`mlr_autofit`/`mlr_fontSize` keys (only explanatory comments mention the old names).
+- Re-ran the full import-path and named-export cross-check across all `services/firebase/*.js` files — all resolve correctly.
+- Re-ran the `getElementById`/`onclick`/`onchange` cross-check against `index.html` — all resolve correctly, nothing broken by the theme/sidebar/font/autofit rewiring.
+
+**Known Issues (unchanged, Critical/Medium — not addressed this phase):** All 3 Critical findings (C1–C3) and all 5 Medium findings from Phase 6 remain open, exactly as documented there. Awaiting your direction on which tier to address next.
+
+**Next Phase:** Awaiting approval/direction — Critical findings (C1–C3) are the most consequential remaining items, but per your explicit instruction this phase stopped at High only.
