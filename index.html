@@ -53,6 +53,11 @@
       </button>
 
       <!-- Settings -->
+      <!-- Cloud Song Library -->
+      <button class="icon-btn" id="library-btn" title="Song Library" onclick="openLibraryModal()">
+        <svg viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+      </button>
+
       <button class="icon-btn" id="settings-btn" title="Firebase config" onclick="openModal()">
         <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
       </button>
@@ -197,6 +202,103 @@
   </footer>
 
 </div><!-- #app -->
+
+<!-- ============================================================
+     CLOUD SONG LIBRARY (new — Firebase-backed, coexists alongside
+     the existing GitHub-folder setlist; does not replace it)
+     ============================================================ -->
+<div id="library-modal-overlay" onclick="closeLibraryModalOutside(event)">
+  <div id="library-modal-box">
+    <div class="library-modal-header">
+      <h3>Song Library</h3>
+      <button class="icon-btn" onclick="closeLibraryModal()" title="Close">
+        <svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+
+    <div class="library-tabs">
+      <button class="library-tab active" data-tab="songs" onclick="switchLibraryTab('songs')">Songs</button>
+      <button class="library-tab" data-tab="collections" onclick="switchLibraryTab('collections')">Collections</button>
+      <button class="library-tab" data-tab="playlists" onclick="switchLibraryTab('playlists')">Playlists</button>
+      <button class="library-tab" data-tab="recent" onclick="switchLibraryTab('recent')">Recent</button>
+    </div>
+
+    <!-- SONGS TAB -->
+    <div class="library-panel active" id="library-panel-songs">
+      <div class="library-toolbar-row">
+        <input type="text" id="library-search-input" class="library-search" placeholder="Search songs or lyrics…" oninput="handleLibrarySearch(this.value)" />
+        <label class="btn-primary library-import-btn" style="margin:0;">
+          + Import .txt
+          <input type="file" id="library-import-file" accept=".txt" style="display:none;" onchange="handleImportTxt(this)" />
+        </label>
+      </div>
+      <div id="library-songs-list" class="library-list">
+        <div class="library-empty">No songs yet. Import a .txt file to add your first cloud song.</div>
+      </div>
+    </div>
+
+    <!-- COLLECTIONS TAB -->
+    <div class="library-panel" id="library-panel-collections">
+      <div class="library-toolbar-row">
+        <input type="text" id="new-collection-name" class="library-search" placeholder="New collection name…" />
+        <button class="btn-primary library-import-btn" style="margin:0;" onclick="createNewCollection()">+ Create</button>
+      </div>
+      <div id="library-collections-list" class="library-list">
+        <div class="library-empty">No collections yet.</div>
+      </div>
+      <div id="collection-detail-view" style="display:none;">
+        <button class="btn-ghost" style="margin-bottom:10px;" onclick="closeCollectionDetail()">← Back to Collections</button>
+        <h4 id="collection-detail-title"></h4>
+        <div id="collection-detail-songs" class="library-list"></div>
+      </div>
+    </div>
+
+    <!-- PLAYLISTS TAB -->
+    <div class="library-panel" id="library-panel-playlists">
+      <div class="library-toolbar-row">
+        <input type="text" id="new-playlist-name" class="library-search" placeholder="New playlist name…" />
+        <button class="btn-primary library-import-btn" style="margin:0;" onclick="createNewPlaylist()">+ Create</button>
+      </div>
+      <div id="library-playlists-list" class="library-list">
+        <div class="library-empty">No playlists yet.</div>
+      </div>
+      <div id="playlist-detail-view" style="display:none;">
+        <button class="btn-ghost" style="margin-bottom:10px;" onclick="closePlaylistDetail()">← Back to Playlists</button>
+        <div class="library-toolbar-row">
+          <h4 id="playlist-detail-title" style="flex:1;"></h4>
+          <button class="btn-primary" style="margin:0;" onclick="playCurrentPlaylist()">▶ Play All</button>
+        </div>
+        <div id="playlist-detail-songs" class="library-list"></div>
+      </div>
+    </div>
+
+    <!-- RECENT TAB -->
+    <div class="library-panel" id="library-panel-recent">
+      <div id="library-recent-list" class="library-list">
+        <div class="library-empty">No recently opened songs yet.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- LYRICS EDITOR -->
+<div id="editor-modal-overlay" onclick="closeEditorModalOutside(event)">
+  <div id="editor-modal-box">
+    <div class="library-modal-header">
+      <h3 id="editor-song-title">Edit Lyrics</h3>
+      <button class="icon-btn" onclick="closeEditorModal()" title="Close">
+        <svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div id="editor-meta" class="editor-meta"></div>
+    <textarea id="editor-textarea" class="editor-textarea" spellcheck="false" oninput="handleEditorInput()"></textarea>
+    <div class="editor-footer">
+      <span id="editor-save-status" class="editor-save-status">Saved</span>
+      <button class="btn-primary" style="margin:0;" onclick="openSongFromLibrary(currentEditingSongId); closeEditorModal();">Open on Stage</button>
+    </div>
+  </div>
+</div>
+
 
 <!-- Firebase Config Modal -->
 <div id="modal-overlay" onclick="closeModalOutside(event)">
