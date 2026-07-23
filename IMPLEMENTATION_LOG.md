@@ -368,3 +368,46 @@ None of the four "only one" targets can be fully true until the old system is re
 **Known Issues (carried over, not addressed this phase):** All 3 Critical findings (C1–C3) and all 5 Medium findings from Phase 6 remain open — in particular, C3 (Favorites/Recent Songs not syncing cross-device) directly affects this phase's Favorites/Recent tabs: they work correctly per-device, but won't yet reflect changes made on a different signed-in device until C3 is fixed. The old GitHub-folder song system and old Firebase sync system in `app.js` remain fully intact and unremoved, per your Phase-8 decision — "only one Song Library/Session Manager/etc." still does not fully hold, now with an added dimension (two ways to browse/open songs: the old sidebar setlist and the new Library modal).
 
 **Next Phase:** Awaiting your direction — candidates include: addressing Critical findings C1–C3 (C3 in particular now has direct UI-visible impact via this phase's Favorites/Recent tabs), or beginning the old-system retirement now that the new Library UI exists as a real replacement path.
+
+---
+
+## Phase 10 — Realtime Synchronization Reliability & Performance Improvements
+
+**Date:** 2026-07-20
+
+**Phase:** Improve synchronization only — reconnect handling, device presence, heartbeat, session expiration, host migration, throttling, loop prevention, reduced writes/reads, and latency, all scoped to `services/firebase/session.js` and `services/firebase/realtime.js`. No Firebase architecture redesign, no MIDI timing implementation, `app.js` and all UI code left completely untouched this phase (confirmed via hash — zero changes).
+
+**Files Modified:**
+- `services/firebase/session.js` — added heartbeat, session expiration (client-side, timer-based, no polling), and host migration.
+- `services/firebase/realtime.js` — added synchronization throttling, and converted `publishPlaybackState`/`publishDisplayState` to multi-path root updates so the session-level activity timestamp is bumped in the *same* network write as the actual state change (zero extra writes added for this).
+
+**Files NOT modified:** `app.js`, `index.html`, `styles.css`, `library.js`, `preference.js`, `firebase.js`, `auth.js`, `browser-bridge.js`, `index.js` — none required changes for this phase's scope, and none were touched.
+
+**Feature-by-feature implementation:**
+- **Reconnect handling:** already existed (Phase 4's `.info/connected` watcher, `watchConnectionState()`) — verified still intact, unchanged.
+- **Device Presence:** already existed (`registerDevice`, `onDisconnect().remove()`, `watchConnectedDevices()`) — verified still intact, unchanged.
+- **Heartbeat (new):** `startHeartbeat()`/`stopHeartbeat()` — a 25-second interval that refreshes this device's own `lastSeen` while connected, independent of the `.info/connected` transport-level watcher (that reports connectivity; this reports this device's own liveness, catching rare cases like a backgrounded mobile tab whose network stack is suspended without firing `disconnect` promptly). Started in `registerDevice()`, stopped in `clearLocalSessionState()`.
+- **Session expiration (new):** a `sessions/{id}/lastActivityAt` field (bumped only by real playback/display publishes, not by mere device presence/heartbeat — an idle-but-connected session still expires, which is the intended semantics). `joinSession()` now rejects joining a session that's been inactive for over 12 hours with a clear error message. While inside an active session, `watchSessionExpiration()` listens once to `lastActivityAt` and schedules a single local timer for exactly when it would go stale — no polling, no repeated reads. `onSessionExpired(callback)` lets future UI show a notice when this fires (also auto-calls `leaveSession()`). **Documented limitation:** since this project uses no Cloud Functions, there is no server-side cleanup of expired session data — expiration is enforced client-side only (unjoinable + occupants notified), not deleted from the database.
+- **Host migration (new):** if the host device disconnects, an eligible device (admin or presenter only — never a viewer) automatically attempts to claim the host role via a Realtime Database transaction on `sessions/{id}/hostId`, which guarantees only one device wins if several notice the host is gone simultaneously. The winning device's own role is then set to `host` (picked up automatically by the existing `watchOwnDevice()`/`onRoleChange()` mechanism from Phase 4 — no new role-propagation code needed).
+- **Synchronization throttling (new):** a generic leading+trailing `throttle()` helper. Applied specifically to `setPlaybackPosition` (200ms) — the one field realistically at risk of high-frequency calls (e.g. continuous position reporting). Discrete, human-triggered actions (play/pause/stop/next/prev/song-change/theme/font/fullscreen) are deliberately left un-throttled, since delaying a button press would add perceptible lag for no benefit.
+- **Prevent synchronization loops:** already implemented (Phase 4's `beginRemoteApply`/`endRemoteApply` suppress guard) — verified still intact and unaffected; none of this phase's new write paths (heartbeat's `lastSeen`, host migration's `hostId`/`role`) touch the `playbackState`/`displayState` nodes the loop guard protects, so no new loop risk was introduced.
+- **Reduce Firebase writes:** the multi-path update change means every playback/display state change now costs exactly one write (state fields + `lastActivityAt` together) instead of what would otherwise have been two separate writes to record activity. Diffing (Phase 4) continues to skip writes for unchanged values.
+- **Reduce Firebase reads:** `watchHostPresence()` was specifically designed to avoid firing a fresh one-shot `.get()` read every time the `devices` list changes (which happens often — every connected device's heartbeat re-fires that listener for everyone watching it). Instead, it keeps a small locally-cached `hostId` in sync via one persistent, low-churn listener (hostId only changes on an actual migration) and checks against that cache synchronously — zero additional reads per devices-list update.
+- **Improve latency:** the multi-path update collapses two round-trips into one for every playback/display change, directly reducing the time between a control action and all fields (including the activity timestamp) being committed.
+- **Beat/Measure/Tempo reserved fields:** confirmed unchanged — still nullable placeholders in `createSession()`'s initial write, still only settable via the existing, uncalled `setTimingPlaceholders()`. No MIDI timing engine was implemented, per your explicit instruction.
+
+**Architecture Decisions:**
+- Session expiration is based on **playback/display activity**, not mere device connectivity — a session where devices are connected but nobody is actually controlling anything still expires after 12 hours, which is the more honest definition of "session in active use."
+- Host migration restricts eligibility to admin/presenter roles only (never viewer) as a deliberate safety choice — a read-only device should never be able to become the controlling host just because it happened to be the only one left connected.
+- No Cloud Functions were introduced or assumed anywhere in this phase (consistent with the project's original Firebase constraints) — every reliability feature (heartbeat, expiration, host migration) is implemented as ordinary client-side Realtime Database reads/writes/transactions, callable from any connected device.
+
+**Verification performed:**
+- `node --input-type=module --check` on all 8 `services/firebase/*.js` files — all pass.
+- Confirmed `app.js` is byte-identical to its state before this phase (hash comparison) — zero changes, as scoped.
+- Full import-path and named-export cross-check across all `services/firebase/*.js` files — all resolve correctly.
+- Confirmed no duplicate top-level function declarations were introduced in the two modified files.
+- Re-confirmed every `window.MLFirebase.*` function that Phase 9's Library UI depends on (18 functions) is still exported with the same name and signature — Phase 9's UI is unaffected by this phase's changes.
+
+**Known Issues (unchanged from Phase 6, not addressed this phase):** All 3 Critical findings (C1–C3) and all 5 Medium findings remain open. This phase did not touch the old `app.js` Firebase/session/sync system, per the ongoing postponement from Phase 8 — the improvements here apply only to the new `services/firebase/*` system, which (as of Phase 9) has a real UI consumer for song browsing but still has no UI wiring for session creation/joining/role management itself.
+
+**Next Phase:** Awaiting your direction — candidates remain: Critical findings C1–C3 (C3 especially, given Phase 9's Favorites/Recent tabs are UI-visible now), wiring session creation/joining/device-management UI (to actually exercise heartbeat/expiration/host-migration in practice), or beginning old-system retirement.

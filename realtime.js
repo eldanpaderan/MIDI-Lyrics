@@ -55,6 +55,43 @@ function endRemoteApply()   { suppressDepth = Math.max(0, suppressDepth - 1); }
 function isSuppressed()     { return suppressDepth > 0; }
 
 /* ================================================================
+   SYNCHRONIZATION THROTTLING
+   ================================================================
+   Discrete, human-triggered actions (play/pause/stop/next/prev/song
+   change/theme/font/fullscreen) are left un-throttled — they're
+   naturally infrequent and delaying them would add perceptible lag to
+   a button press. Only fields that could realistically be called at
+   high frequency (continuous playback-position reporting) are
+   throttled, using a leading+trailing pattern: the first call in a
+   window fires immediately, and if more calls arrive before the
+   window elapses, only the LAST one is sent once the window ends —
+   never silently dropped, just coalesced.
+   ================================================================ */
+function throttle(fn, waitMs) {
+  let lastCallAt = 0;
+  let timer = null;
+  let pendingArgs = null;
+  return (...args) => {
+    const now = Date.now();
+    const remaining = waitMs - (now - lastCallAt);
+    if (remaining <= 0) {
+      lastCallAt = now;
+      if (timer) { clearTimeout(timer); timer = null; }
+      return fn(...args);
+    }
+    pendingArgs = args;
+    if (!timer) {
+      timer = setTimeout(() => {
+        lastCallAt = Date.now();
+        timer = null;
+        fn(...pendingArgs);
+      }, remaining);
+    }
+    return Promise.resolve();
+  };
+}
+
+/* ================================================================
    DIFFED WRITES (reduce unnecessary Firebase updates)
    ================================================================
    Both caches are kept in sync with the *authoritative* remote value
@@ -82,10 +119,6 @@ function diffPartial(partial, cache) {
    PLAYBACK STATE — Play/Pause/Stop/Next/Previous/Song/Page/Position
    ================================================================ */
 
-function playbackStateRef() {
-  return db().ref(`sessions/${requireSession()}/playbackState`);
-}
-
 /**
  * Host, Admin, and Presenter devices may publish playback state.
  * Viewer devices should only ever watch it (see watchPlaybackState).
@@ -100,7 +133,19 @@ function publishPlaybackState(partial) {
   if (!changed) return Promise.resolve(); // no actual change — skip the write entirely
 
   Object.assign(lastKnownPlaybackState, changed);
-  return playbackStateRef().update({ ...changed, updatedAt: serverTimestamp() });
+  const sid = requireSession();
+
+  // Multi-path update: writes the changed playbackState fields AND bumps
+  // the session-level lastActivityAt (used by session.js's expiration
+  // watcher) in a single network round-trip, instead of two separate
+  // writes — reduces both write count and latency for this operation.
+  const updates = {};
+  for (const [key, value] of Object.entries(changed)) {
+    updates[`sessions/${sid}/playbackState/${key}`] = value;
+  }
+  updates[`sessions/${sid}/playbackState/updatedAt`] = serverTimestamp();
+  updates[`sessions/${sid}/lastActivityAt`] = serverTimestamp();
+  return db().ref().update(updates);
 }
 
 export function play()  { return publishPlaybackState({ status: 'playing' }); }
@@ -123,8 +168,16 @@ export function previous(currentPageIndex) {
   return setPage(Math.max(0, currentPageIndex - 1));
 }
 
+// Throttled (200ms, leading+trailing): playbackPosition is the one field
+// here that could realistically be called at high frequency (e.g. a
+// continuous scrubber or per-frame position reporting) — see the
+// SYNCHRONIZATION THROTTLING section above.
+const throttledPublishPlaybackPosition = throttle(
+  (position) => publishPlaybackState({ playbackPosition: position }),
+  200
+);
 export function setPlaybackPosition(position) {
-  return publishPlaybackState({ playbackPosition: position });
+  return throttledPublishPlaybackPosition(position);
 }
 
 /**
@@ -166,10 +219,6 @@ export function watchPlaybackState(callback) {
    unrelated concern — smaller, more targeted writes and re-renders.
    ================================================================ */
 
-function displayStateRef() {
-  return db().ref(`sessions/${requireSession()}/displayState`);
-}
-
 function publishDisplayState(partial) {
   if (isSuppressed()) return Promise.resolve();
   if (!canControlPlayback()) {
@@ -180,7 +229,15 @@ function publishDisplayState(partial) {
   if (!changed) return Promise.resolve();
 
   Object.assign(lastKnownDisplayState, changed);
-  return displayStateRef().update({ ...changed, updatedAt: serverTimestamp() });
+  const sid = requireSession();
+
+  const updates = {};
+  for (const [key, value] of Object.entries(changed)) {
+    updates[`sessions/${sid}/displayState/${key}`] = value;
+  }
+  updates[`sessions/${sid}/displayState/updatedAt`] = serverTimestamp();
+  updates[`sessions/${sid}/lastActivityAt`] = serverTimestamp();
+  return db().ref().update(updates);
 }
 
 export function setSyncedTheme(theme)          { return publishDisplayState({ theme }); }
