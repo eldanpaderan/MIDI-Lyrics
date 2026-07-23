@@ -67,7 +67,6 @@ document.addEventListener('DOMContentLoaded', () => {
    PREFS (localStorage)
    ---------------------------------------------------------- */
 function saveLocalPrefs() {
-  localStorage.setItem('mlr_fontSize',     state.fontSize);
   localStorage.setItem('mlr_mode',         state.mode);
   localStorage.setItem('mlr_midiNext',     JSON.stringify(state.midiNextNote));
   localStorage.setItem('mlr_midiPrev',     JSON.stringify(state.midiPrevNote));
@@ -75,8 +74,6 @@ function saveLocalPrefs() {
 }
 
 function loadLocalPrefs() {
-  const fs = localStorage.getItem('mlr_fontSize');
-  if (fs !== null) state.fontSize = parseInt(fs, 10);
   const mode = localStorage.getItem('mlr_mode');
   if (mode) setMode(mode, true);
   const mn = localStorage.getItem('mlr_midiNext');
@@ -86,6 +83,39 @@ function loadLocalPrefs() {
   const fbe = localStorage.getItem('mlr_fbEnabled');
   if (fbe) state.fbEnabled = fbe === 'true';
   updateMidiMappingInfo();
+  loadFontSizeFromPreferences();
+}
+
+/* ----------------------------------------------------------
+   PREFERENCE SERVICE DELEGATION (audit fix H4)
+   ----------------------------------------------------------
+   Theme, sidebar-collapsed, font size, and auto-fit used to be saved
+   under their own separate localStorage keys here (mlr_theme,
+   mlr_sidebar_collapsed, mlr_fontSize, mlr_autofit), completely
+   disconnected from services/firebase/preference.js's PreferenceService
+   — meaning these settings could never actually sync across devices
+   even when Firebase sync was enabled, and the two systems could
+   silently drift out of sync with each other. These two functions
+   route reads/writes through the single PreferenceService instead
+   (which itself always persists to localStorage under one shared key,
+   'mlr_preferences', regardless of whether Firebase is configured —
+   see preference.js). If the services module hasn't loaded for some
+   reason, these fall back to safe in-memory defaults rather than
+   writing to a second localStorage key, to avoid reintroducing the
+   same duplication this fix is meant to remove.
+   ---------------------------------------------------------- */
+function getSyncedPref(key, fallback) {
+  if (window.MLFirebase && typeof window.MLFirebase.getPreferences === 'function') {
+    const prefs = window.MLFirebase.getPreferences();
+    return (prefs && prefs[key] !== undefined) ? prefs[key] : fallback;
+  }
+  return fallback;
+}
+
+function setSyncedPref(key, value) {
+  if (window.MLFirebase && typeof window.MLFirebase.setPreference === 'function') {
+    window.MLFirebase.setPreference(key, value);
+  }
 }
 
 /* ----------------------------------------------------------
@@ -346,6 +376,15 @@ function changeFontSize(dir) {
   state.fontSize = Math.max(0, Math.min(FONT_SIZES.length - 1, state.fontSize + dir));
   updateFontDisplay();
   saveLocalPrefs();
+  setSyncedPref('font', { size: FONT_SIZES[state.fontSize].label });
+}
+
+function loadFontSizeFromPreferences() {
+  const font = getSyncedPref('font', null);
+  if (font && font.size) {
+    const idx = FONT_SIZES.findIndex((f) => f.label === font.size);
+    if (idx !== -1) state.fontSize = idx;
+  }
 }
 
 function updateFontDisplay() {
@@ -804,14 +843,14 @@ const THEME_META = {
 };
 
 function initTheme() {
-  const saved = localStorage.getItem('mlr_theme');
+  const saved = getSyncedPref('theme', null);
   setTheme(THEME_ORDER.includes(saved) ? saved : 'dark', true);
 }
 
 function setTheme(theme, silent = false) {
   if (!THEME_ORDER.includes(theme)) return;
   document.documentElement.setAttribute('data-theme', theme);
-  localStorage.setItem('mlr_theme', theme);
+  setSyncedPref('theme', theme);
   const btn = document.getElementById('theme-btn');
   if (btn) {
     const meta = THEME_META[theme];
@@ -861,7 +900,8 @@ document.addEventListener('webkitfullscreenchange', updateFullscreenBtn);
    which remains untouched.
    ---------------------------------------------------------- */
 function initSidebarCollapse() {
-  const collapsed = localStorage.getItem('mlr_sidebar_collapsed') === 'true';
+  const sidebarPref = getSyncedPref('sidebar', { collapsed: false });
+  const collapsed = !!(sidebarPref && sidebarPref.collapsed);
   document.getElementById('app')?.classList.toggle('sidebar-collapsed', collapsed);
   updateSidebarCollapseBtn(collapsed);
 }
@@ -871,7 +911,7 @@ function toggleSidebarCollapse() {
   if (!app) return;
   const collapsed = !app.classList.contains('sidebar-collapsed');
   app.classList.toggle('sidebar-collapsed', collapsed);
-  localStorage.setItem('mlr_sidebar_collapsed', collapsed);
+  setSyncedPref('sidebar', { collapsed });
   updateSidebarCollapseBtn(collapsed);
 }
 
@@ -891,7 +931,7 @@ let autoFitRAF = null;
 let autoFitResizeDebounce = null;
 
 function initAutoFit() {
-  autoFitEnabled = localStorage.getItem('mlr_autofit') === 'true';
+  autoFitEnabled = getSyncedPref('autoFit', false);
   const toggle = document.getElementById('autofit-toggle');
   if (toggle) toggle.checked = autoFitEnabled;
 
@@ -923,7 +963,7 @@ function initAutoFit() {
 
 function toggleAutoFit(on) {
   autoFitEnabled = on;
-  localStorage.setItem('mlr_autofit', on);
+  setSyncedPref('autoFit', on);
   if (on) {
     fitLyricText();
   } else {

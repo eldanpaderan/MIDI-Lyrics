@@ -54,17 +54,25 @@ function uniqueId(base) {
  */
 export async function addOrUpdateSong(songId, name, text) {
   const ref = db().ref(`library/songs/${songId}`);
-  const snap = await ref.get();
-  const existing = snap.exists() ? snap.val() : null;
   const user = getCurrentUser();
 
-  await ref.set({
-    name,
-    text,
-    addedBy: (existing && existing.addedBy) || (user && user.uid) || null,
-    createdAt: (existing && existing.createdAt) || serverTimestamp(),
-    updatedAt: serverTimestamp(),
+  // Atomic transaction (not a read-then-set) so two devices importing or
+  // editing the same songId concurrently can't clobber each other's write —
+  // the transaction function may be re-run by the SDK if the server value
+  // changed between read and write, using the freshest `existing` each time.
+  const result = await ref.transaction((existing) => {
+    return {
+      name,
+      text,
+      addedBy: (existing && existing.addedBy) || (user && user.uid) || null,
+      createdAt: (existing && existing.createdAt) || serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    };
   });
+
+  if (!result.committed) {
+    throw new Error(`Failed to save song "${songId}" — the write was not committed.`);
+  }
   return songId;
 }
 

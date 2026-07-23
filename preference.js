@@ -21,6 +21,7 @@ const DEFAULTS = {
   theme: 'dark',
   font: { size: 'M' },
   sidebar: { collapsed: false },
+  autoFit: false,
   windowLayout: {},
   playbackSpeed: 1.0,
   favorites: {},
