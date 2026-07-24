@@ -1044,6 +1044,22 @@ document.addEventListener('DOMContentLoaded', () => {
    backend function names were intentionally left unchanged.
    ============================================================ */
 
+/**
+ * QA fix (production readiness review): song/collection/playlist/recent
+ * names are user-controlled (typed by any signed-in device, or derived
+ * from an imported .txt filename) and were being interpolated directly
+ * into innerHTML unescaped below — a maliciously-named entry (e.g. a
+ * file literally named "<img src=x onerror=...>.txt") could execute
+ * arbitrary script for every device that opens the Library. All
+ * dynamic name fields rendered via innerHTML in this section now pass
+ * through this escape function first.
+ */
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = String(str == null ? '' : str);
+  return div.innerHTML;
+}
+
 let libraryCache = {};
 let collectionsCache = {};
 let playlistsCache = {};
@@ -1149,7 +1165,7 @@ function renderLibrarySongsList() {
       row.className = 'library-row';
       row.innerHTML = `
         <button class="library-fav-btn ${isFav ? 'active' : ''}" title="Toggle favorite">${isFav ? '★' : '☆'}</button>
-        <span class="library-row-name">${song.name}</span>
+        <span class="library-row-name" tabindex="0" role="button" aria-label="Open ${escapeHtml(song.name)}">${escapeHtml(song.name)}</span>
         <span class="library-row-meta">${formatTimestamp(song.updatedAt)}</span>
         <div class="library-row-actions">
           <button class="edit-btn">Edit</button>
@@ -1160,6 +1176,9 @@ function renderLibrarySongsList() {
         toggleLibraryFavorite(song.id);
       });
       row.querySelector('.library-row-name').addEventListener('click', () => openSongFromLibrary(song.id));
+      row.querySelector('.library-row-name').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openSongFromLibrary(song.id); }
+      });
       row.querySelector('.open-btn').addEventListener('click', () => openSongFromLibrary(song.id));
       row.querySelector('.edit-btn').addEventListener('click', () => openEditorForSong(song.id));
       container.appendChild(row);
@@ -1274,10 +1293,13 @@ function renderCollectionsList() {
     const row = document.createElement('div');
     row.className = 'library-row';
     row.innerHTML = `
-      <span class="library-row-name" style="cursor:pointer;">${col.name}</span>
+      <span class="library-row-name" style="cursor:pointer;" tabindex="0" role="button" aria-label="Open ${escapeHtml(col.name)}">${escapeHtml(col.name)}</span>
       <span class="library-row-meta">${count} song${count === 1 ? '' : 's'}</span>
       <div class="library-row-actions"><button class="del-btn">Delete</button></div>`;
     row.querySelector('.library-row-name').addEventListener('click', () => openCollectionDetail(id));
+    row.querySelector('.library-row-name').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openCollectionDetail(id); }
+    });
     row.querySelector('.del-btn').addEventListener('click', () => {
       if (libraryServicesAvailable()) window.MLFirebase.deleteCollection(id);
     });
@@ -1317,7 +1339,7 @@ function renderCollectionDetail(collectionId) {
   let html = '';
   songIds.forEach((sid) => {
     const song = libraryCache[sid];
-    html += `<div class="library-row"><span class="library-row-name">${song ? song.name : sid}</span>
+    html += `<div class="library-row"><span class="library-row-name">${escapeHtml(song ? song.name : sid)}</span>
       <div class="library-row-actions"><button data-remove="${sid}">Remove</button></div></div>`;
   });
 
@@ -1325,7 +1347,7 @@ function renderCollectionDetail(collectionId) {
   html += `<div class="library-toolbar-row" style="margin-top:10px;">
       <select id="collection-add-select" class="library-search">
         <option value="">Add a song…</option>
-        ${remaining.map(([sid, s]) => `<option value="${sid}">${s.name}</option>`).join('')}
+        ${remaining.map(([sid, s]) => `<option value="${sid}">${escapeHtml(s.name)}</option>`).join('')}
       </select>
       <button class="btn-primary" style="margin:0;" id="collection-add-btn">Add</button>
     </div>`;
@@ -1360,10 +1382,13 @@ function renderPlaylistsList() {
     const row = document.createElement('div');
     row.className = 'library-row';
     row.innerHTML = `
-      <span class="library-row-name" style="cursor:pointer;">${pl.name}</span>
+      <span class="library-row-name" style="cursor:pointer;" tabindex="0" role="button" aria-label="Open ${escapeHtml(pl.name)}">${escapeHtml(pl.name)}</span>
       <span class="library-row-meta">${count} song${count === 1 ? '' : 's'}</span>
       <div class="library-row-actions"><button class="del-btn">Delete</button></div>`;
     row.querySelector('.library-row-name').addEventListener('click', () => openPlaylistDetail(id));
+    row.querySelector('.library-row-name').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openPlaylistDetail(id); }
+    });
     row.querySelector('.del-btn').addEventListener('click', () => {
       if (libraryServicesAvailable()) window.MLFirebase.deleteSetlist(id);
     });
@@ -1404,7 +1429,7 @@ function renderPlaylistDetail(playlistId) {
   songIds.forEach((sid, i) => {
     const song = libraryCache[sid];
     html += `<div class="library-row">
-      <span class="library-row-name">${song ? song.name : sid}</span>
+      <span class="library-row-name">${escapeHtml(song ? song.name : sid)}</span>
       <div class="library-row-actions">
         <button class="reorder-btn" data-up="${i}" ${i === 0 ? 'disabled' : ''}>↑</button>
         <button class="reorder-btn" data-down="${i}" ${i === songIds.length - 1 ? 'disabled' : ''}>↓</button>
@@ -1416,7 +1441,7 @@ function renderPlaylistDetail(playlistId) {
   html += `<div class="library-toolbar-row" style="margin-top:10px;">
       <select id="playlist-add-select" class="library-search">
         <option value="">Add a song…</option>
-        ${remaining.map(([sid, s]) => `<option value="${sid}">${s.name}</option>`).join('')}
+        ${remaining.map(([sid, s]) => `<option value="${sid}">${escapeHtml(s.name)}</option>`).join('')}
       </select>
       <button class="btn-primary" style="margin:0;" id="playlist-add-btn">Add</button>
     </div>`;
@@ -1535,9 +1560,12 @@ function renderRecentList() {
   recents.forEach((r) => {
     const row = document.createElement('div');
     row.className = 'library-row';
-    row.innerHTML = `<span class="library-row-name" style="cursor:pointer;">${r.name}</span>
+    row.innerHTML = `<span class="library-row-name" style="cursor:pointer;" tabindex="0" role="button" aria-label="Open ${escapeHtml(r.name)}">${escapeHtml(r.name)}</span>
       <span class="library-row-meta">${formatTimestamp(r.openedAt)}</span>`;
     row.querySelector('.library-row-name').addEventListener('click', () => openSongFromLibrary(r.songId));
+    row.querySelector('.library-row-name').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openSongFromLibrary(r.songId); }
+    });
     container.appendChild(row);
   });
 }

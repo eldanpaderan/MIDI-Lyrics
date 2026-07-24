@@ -42,6 +42,10 @@ const SELF_ASSIGNABLE_ROLES = new Set([ROLES.VIEWER, ROLES.PRESENTER]);
 const CONTROL_ROLES = new Set([ROLES.HOST, ROLES.ADMIN, ROLES.PRESENTER]);
 const MANAGE_ROLES = new Set([ROLES.HOST, ROLES.ADMIN]);
 
+// Phase 10: sync-reliability tuning constants.
+const HEARTBEAT_INTERVAL_MS = 25000;          // how often a connected device refreshes its own lastSeen
+const SESSION_EXPIRATION_MS = 12 * 60 * 60 * 1000; // 12h of no playback/display activity = expired
+
 let activeSessionId = null;
 let deviceRef = null;
 let role = null;
@@ -50,8 +54,14 @@ let kicked = false;
 const roleChangeListeners = new Set();
 const kickListeners = new Set();
 const connectionListeners = new Set();
+const sessionExpiredListeners = new Set();
+const sessionChangeListeners = new Set();
 let connectionWatcherStarted = false;
 let deviceRoleUnsub = null;
+let heartbeatTimer = null;
+let hostWatchUnsub = null;
+let expirationWatchUnsub = null;
+let expirationTimeout = null;
 
 function db() {
   return getFirebaseApp().database();
@@ -101,6 +111,7 @@ export async function createSession(deviceInfo = {}) {
   await ref.set({
     hostId: getCurrentUser().uid,
     createdAt: serverTimestamp(),
+    lastActivityAt: serverTimestamp(),
     playbackState: {
       status: 'stopped',
       currentSongId: null,
@@ -122,6 +133,7 @@ export async function createSession(deviceInfo = {}) {
   });
   await registerDevice(sessionId, ROLES.HOST, deviceInfo);
   activeSessionId = sessionId;
+  notifySessionChange();
   return sessionId;
 }
 
@@ -138,10 +150,22 @@ export async function joinSession(sessionId, deviceInfo = {}, requestedRole = RO
   const snap = await db().ref(`sessions/${sessionId}`).get();
   if (!snap.exists()) throw new Error(`Session "${sessionId}" was not found.`);
 
+  const sessionData = snap.val();
+  if (isSessionExpired(sessionData)) {
+    throw new Error(`Session "${sessionId}" has expired (no activity for over ${Math.round(SESSION_EXPIRATION_MS / 3600000)}h). Ask the host to start a new one.`);
+  }
+
   const safeRole = SELF_ASSIGNABLE_ROLES.has(requestedRole) ? requestedRole : ROLES.VIEWER;
   await registerDevice(sessionId, safeRole, deviceInfo);
   activeSessionId = sessionId;
+  notifySessionChange();
   return sessionId;
+}
+
+function isSessionExpired(sessionData) {
+  const lastActivity = sessionData.lastActivityAt || sessionData.createdAt;
+  if (!lastActivity || typeof lastActivity !== 'number') return false; // serverTimestamp sentinel not yet resolved — treat as fresh
+  return (Date.now() - lastActivity) > SESSION_EXPIRATION_MS;
 }
 
 async function registerDevice(sessionId, deviceRole, deviceInfo) {
@@ -174,6 +198,14 @@ async function registerDevice(sessionId, deviceRole, deviceInfo) {
 
   watchOwnDevice(ref);
   startConnectionWatcher();
+  startHeartbeat();
+  watchSessionExpiration(sessionId);
+
+  // Only admin/presenter devices are eligible to auto-promote themselves
+  // if the host disconnects — viewers must never become host automatically.
+  if (deviceRole === ROLES.ADMIN || deviceRole === ROLES.PRESENTER) {
+    watchHostPresence(sessionId);
+  }
 }
 
 function defaultLabelFor(deviceRole) {
@@ -225,9 +257,34 @@ export function leaveSession() {
 
 function clearLocalSessionState() {
   if (deviceRoleUnsub) { deviceRoleUnsub(); deviceRoleUnsub = null; }
+  stopHeartbeat();
+  if (hostWatchUnsub) { hostWatchUnsub(); hostWatchUnsub = null; }
+  if (expirationWatchUnsub) { expirationWatchUnsub(); expirationWatchUnsub = null; }
+  if (expirationTimeout) { clearTimeout(expirationTimeout); expirationTimeout = null; }
   activeSessionId = null;
   role = null;
   deviceRef = null;
+  notifySessionChange();
+}
+
+/**
+ * QA fix (production readiness review, Critical C2): notifies anything
+ * that needs to reset per-session local state whenever the active
+ * session changes (created, joined, or left). Added specifically so
+ * realtime.js can reset its diffing caches (lastKnownPlaybackState/
+ * lastKnownDisplayState) — those caches are module-level and were never
+ * being cleared across a session change, so a stale value left over
+ * from a previous session could cause a genuine change in a new
+ * session to be incorrectly skipped as a "no-op" write.
+ */
+function notifySessionChange() {
+  sessionChangeListeners.forEach((cb) => cb(activeSessionId));
+}
+
+/** Subscribe to the active session changing (created/joined/left). */
+export function onSessionChange(callback) {
+  sessionChangeListeners.add(callback);
+  return () => sessionChangeListeners.delete(callback);
 }
 
 export function getActiveSessionId() {
@@ -326,4 +383,147 @@ export function watchConnectionState(callback) {
   startConnectionWatcher();
   connectionListeners.add(callback);
   return () => connectionListeners.delete(callback);
+}
+
+/* ================================================================
+   HEARTBEAT
+   ================================================================
+   While connected, periodically refresh this device's own lastSeen so
+   other devices (and a future "stale device" UI indicator) can tell a
+   genuinely-idle-but-still-connected device apart from one that never
+   got a clean onDisconnect (rare, but possible on some mobile OSes that
+   suspend a backgrounded tab's network stack without firing the
+   disconnect event promptly). This is independent of the
+   .info/connected-based reconnect handling above — that reports
+   *transport* connectivity; this reports *this device's own liveness*.
+   ================================================================ */
+function startHeartbeat() {
+  stopHeartbeat();
+  heartbeatTimer = setInterval(() => {
+    if (deviceRef) {
+      deviceRef.update({ lastSeen: serverTimestamp() }).catch(() => {});
+    }
+  }, HEARTBEAT_INTERVAL_MS);
+}
+
+function stopHeartbeat() {
+  if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+}
+
+/* ================================================================
+   SESSION EXPIRATION
+   ================================================================
+   No Cloud Functions are used in this project, so there is no
+   server-side cron to expire/delete stale sessions. Expiration is
+   therefore enforced two ways, both client-side:
+     1. joinSession() rejects joining an already-expired session
+        (see isSessionExpired() above).
+     2. While inside an active session, this watcher listens to
+        sessions/{id}/lastActivityAt (bumped by realtime.js on every
+        real playback/display publish — NOT by mere device presence,
+        so an idle-but-connected session still expires) and schedules
+        a local timer for exactly when it WOULD go stale, rather than
+        polling repeatedly — one persistent value listener plus one
+        timer, no repeated reads.
+   Known limitation: an expired session's data is not automatically
+   deleted from Realtime Database (would require Cloud Functions,
+   which this project intentionally does not use) — it simply becomes
+   unjoinable and the current occupants are notified/disconnected.
+   ================================================================ */
+function watchSessionExpiration(sessionId) {
+  if (expirationWatchUnsub) expirationWatchUnsub();
+  const ref = db().ref(`sessions/${sessionId}/lastActivityAt`);
+  const handler = (snap) => {
+    const lastActivity = snap.val();
+    if (expirationTimeout) clearTimeout(expirationTimeout);
+    if (typeof lastActivity !== 'number') return; // serverTimestamp sentinel not yet resolved locally
+
+    const msUntilExpired = (lastActivity + SESSION_EXPIRATION_MS) - Date.now();
+    if (msUntilExpired <= 0) {
+      handleSessionExpired();
+    } else {
+      expirationTimeout = setTimeout(handleSessionExpired, msUntilExpired);
+    }
+  };
+  ref.on('value', handler);
+  expirationWatchUnsub = () => ref.off('value', handler);
+}
+
+function handleSessionExpired() {
+  sessionExpiredListeners.forEach((cb) => cb());
+  leaveSession();
+}
+
+/** Subscribe to this device's active session expiring due to inactivity. */
+export function onSessionExpired(callback) {
+  sessionExpiredListeners.add(callback);
+  return () => sessionExpiredListeners.delete(callback);
+}
+
+/* ================================================================
+   HOST MIGRATION
+   ================================================================
+   If the host device disconnects (its devices/{uid} entry is removed
+   via onDisconnect — see registerDevice), an eligible remaining device
+   (admin or presenter only — never a viewer) automatically attempts to
+   claim the host role, so the session doesn't become permanently
+   uncontrollable. Uses a Realtime Database transaction on
+   sessions/{id}/hostId so that if multiple eligible devices notice the
+   host is gone at the same time, only one of them actually wins the
+   promotion — the transaction is only allowed to succeed if hostId
+   still points at the now-missing host's uid, which the server
+   guarantees is only true for exactly one "winner" attempt.
+   ================================================================ */
+function watchHostPresence(sessionId) {
+  if (hostWatchUnsub) hostWatchUnsub();
+
+  // Read-reduction note: the devices list changes often (every connected
+  // device's heartbeat bumps its own lastSeen, re-firing this 'value'
+  // listener for everyone watching sessions/{id}/devices). Re-fetching
+  // hostId with a fresh .get() on every one of those firings would be
+  // wasteful. Instead, keep a small locally-cached hostId in sync via one
+  // persistent, low-churn listener (hostId only changes on migration),
+  // and check against that cache synchronously — zero extra reads per
+  // devices-list update.
+  let cachedHostId = null;
+  const hostIdRef = db().ref(`sessions/${sessionId}/hostId`);
+  const hostIdHandler = (snap) => { cachedHostId = snap.val(); };
+  hostIdRef.on('value', hostIdHandler);
+
+  const devicesRef = db().ref(`sessions/${sessionId}/devices`);
+  const devicesHandler = (snap) => {
+    const devices = snap.val() || {};
+    if (cachedHostId && !devices[cachedHostId]) {
+      attemptHostMigration(sessionId, cachedHostId);
+    }
+  };
+  devicesRef.on('value', devicesHandler);
+
+  hostWatchUnsub = () => {
+    hostIdRef.off('value', hostIdHandler);
+    devicesRef.off('value', devicesHandler);
+  };
+}
+
+async function attemptHostMigration(sessionId, missingHostId) {
+  const user = getCurrentUser();
+  if (!user || !deviceRef) return;
+
+  const hostIdRef = db().ref(`sessions/${sessionId}/hostId`);
+  let result;
+  try {
+    result = await hostIdRef.transaction((current) => {
+      // Only claim if hostId still points at the device we saw go
+      // missing — if it changed (host reconnected, or another device
+      // already won this race), abort by returning the unchanged value.
+      return current === missingHostId ? user.uid : current;
+    });
+  } catch {
+    return; // transaction aborted/failed — another device likely won
+  }
+
+  if (result.committed && result.snapshot.val() === user.uid) {
+    // We won the race — promote our own device role to host.
+    await deviceRef.update({ role: ROLES.HOST }).catch(() => {});
+  }
 }

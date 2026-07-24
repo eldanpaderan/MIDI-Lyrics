@@ -47,7 +47,7 @@ function writeLocal(prefs) {
 }
 
 let cached = readLocal();
-let remoteUnsub = null;
+let remoteUnsubs = [];
 
 /** @returns {object} the full current preferences object (local cache). */
 export function getPreferences() {
@@ -79,21 +79,48 @@ export function setPreference(key, value) {
  */
 export function initPreferenceSync() {
   onAuthChange((user) => {
-    if (remoteUnsub) { remoteUnsub(); remoteUnsub = null; }
+    remoteUnsubs.forEach((unsub) => unsub());
+    remoteUnsubs = [];
     if (!user) return;
 
-    const ref = db().ref(`users/${user.uid}/preferences`);
-    const handler = (snap) => {
+    const prefsRef = db().ref(`users/${user.uid}/preferences`);
+    const prefsHandler = (snap) => {
       const remote = snap.val();
       if (remote) {
         cached = { ...DEFAULTS, ...cached, ...remote };
         writeLocal(cached);
       } else {
-        ref.set(cached).catch(() => {});
+        prefsRef.set(cached).catch(() => {});
       }
     };
-    ref.on('value', handler);
-    remoteUnsub = () => ref.off('value', handler);
+    prefsRef.on('value', prefsHandler);
+    remoteUnsubs.push(() => prefsRef.off('value', prefsHandler));
+
+    /**
+     * QA fix (production readiness review, Critical C3): favorites and
+     * recentSongs are written to users/{uid}/favorites and
+     * users/{uid}/recentSongs (see toggleFavorite()/addRecentSong()
+     * below) but this function previously only ever watched
+     * users/{uid}/preferences — meaning a favorite toggled or a song
+     * opened on one device would never appear on another signed-in
+     * device, contradicting this module's own documented behavior.
+     * These two listeners close that gap.
+     */
+    const favoritesRef = db().ref(`users/${user.uid}/favorites`);
+    const favoritesHandler = (snap) => {
+      cached = { ...cached, favorites: snap.val() || {} };
+      writeLocal(cached);
+    };
+    favoritesRef.on('value', favoritesHandler);
+    remoteUnsubs.push(() => favoritesRef.off('value', favoritesHandler));
+
+    const recentRef = db().ref(`users/${user.uid}/recentSongs`);
+    const recentHandler = (snap) => {
+      cached = { ...cached, recentSongs: snap.val() || [] };
+      writeLocal(cached);
+    };
+    recentRef.on('value', recentHandler);
+    remoteUnsubs.push(() => recentRef.off('value', recentHandler));
   });
 }
 

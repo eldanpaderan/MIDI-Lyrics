@@ -29,10 +29,18 @@ export function initFirebase(config) {
     );
   }
 
-  // Guard against duplicate-app errors if something else already initialized it.
-  app = window.firebase.apps && window.firebase.apps.length
-    ? window.firebase.app()
-    : window.firebase.initializeApp(config);
+  // QA fix (production readiness review): window.firebase.app() fetches
+  // specifically the DEFAULT (unnamed) app. The old check here
+  // (`window.firebase.apps.length ? window.firebase.app() : ...`) assumed
+  // ANY existing app meant the default one existed — but app.js's legacy
+  // Firebase system (connectFirebase()) initializes a NAMED app
+  // ('mlr-' + timestamp), not the default one. If that legacy system had
+  // already connected, this would call window.firebase.app() for a
+  // default app that doesn't exist yet, throwing
+  // "No Firebase App '[DEFAULT]' has been created". Fixed by explicitly
+  // looking for an app named '[DEFAULT]' instead of just checking length.
+  const existingDefault = (window.firebase.apps || []).find((a) => a.name === '[DEFAULT]');
+  app = existingDefault || window.firebase.initializeApp(config);
 
   initialized = true;
   return app;
