@@ -1,20 +1,22 @@
 'use strict';
 
 /* ----------------------------------------------------------
-   CONFIG PLACEHOLDER — replace with your Firebase credentials
-   or use the UI modal to set them at runtime.
-   ---------------------------------------------------------- */
-const DEFAULT_FIREBASE_CONFIG = {
-  apiKey:            "YOUR_API_KEY",
-  authDomain:        "YOUR_PROJECT.firebaseapp.com",
-  databaseURL:       "https://YOUR_PROJECT-default-rtdb.firebaseio.com",
-  projectId:         "YOUR_PROJECT_ID",
-  storageBucket:     "YOUR_PROJECT.appspot.com",
-  messagingSenderId: "YOUR_SENDER_ID",
-  appId:             "YOUR_APP_ID"
-};
+   COMPLETE MIGRATION (Firebase): this app now uses ONLY the modular
+   services in services/firebase/ for all Firebase interaction —
+   firebase.js (init), auth.js (anonymous auth), session.js (session
+   lifecycle + roles), realtime.js (playback/display sync), and
+   preference.js (personal settings sync). The legacy
+   connectFirebase()/fbPublish()/fbStartListening()/handleFollowerUpdate()
+   system and its DEFAULT_FIREBASE_CONFIG/FIREBASE_DB_PATH constants have
+   been fully removed — see docs/IMPLEMENTATION_LOG.md for the full
+   migration record.
 
-const FIREBASE_DB_PATH = "session/currentStatus";
+   Since this app has no session-ID entry UI (Leader/Follower is a
+   simple toggle), all devices share one well-known, fixed session ID.
+   Whichever device is in "Leader" mode becomes/reclaims the Host of
+   this session; "Follower" devices join it as read-only Viewers.
+   ---------------------------------------------------------- */
+const MAIN_SESSION_ID = 'mlr-main-session';
 
 /* ----------------------------------------------------------
    STATE
@@ -30,10 +32,8 @@ const state = {
   midiLearn:    false,
   midiNextNote: null,     // {type, channel, note/cc}
   midiPrevNote: null,
-  fbEnabled:    false,
-  fbApp:        null,
-  fbDb:         null,
-  fbListener:   null,
+  fbEnabled:    false,    // gates the modular Firebase services (same meaning as before, now backed by services/firebase/*)
+  playing:      false,    // Play/Pause/Stop transport flag, synced via realtime.js
   wakeLock:     null,
   wakeLockOn:   false,
 };
@@ -58,7 +58,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const fbToggle = document.getElementById('fb-toggle');
   if (state.fbEnabled && isFirebaseConfigured()) {
     fbToggle.checked = true;
-    connectFirebase();
+    ensureFirebaseReady();
   }
   updateFontDisplay();
 });
@@ -276,6 +276,17 @@ async function selectSong(song) {
    LYRICS ENGINE
    ---------------------------------------------------------- */
 function loadLyrics(song, text) {
+  applySongAndRender(song, text);
+  publishCurrentSongIfLeader(song);
+}
+
+/**
+ * Pure state-update + render step, shared by:
+ *  - loadLyrics() (local user action — Leader/no-sync — publishes after)
+ *  - handleIncomingPlaybackState() (Follower receiving a Leader update —
+ *    renders the SAME way, but never publishes; see that function)
+ */
+function applySongAndRender(song, text) {
   state.activeSong  = song;
   state.currentPage = 0;
 
@@ -299,11 +310,13 @@ function loadLyrics(song, text) {
   document.getElementById('song-title-display').textContent = song.name;
   document.getElementById('empty-state').style.display  = 'none';
   document.getElementById('lyric-display').style.display = 'flex';
+  document.querySelectorAll('.song-item').forEach(el => {
+    el.classList.toggle('active', el.dataset.id === song.id);
+  });
 
   renderPage(0, 'instant');
   renderPips();
   updateNavButtons();
-  fbPublish();
 }
 
 function renderPage(index, mode = 'fade') {
@@ -333,7 +346,7 @@ function navigate(dir) {
   const next = state.currentPage + dir;
   if (next < 0 || next >= state.pages.length) return;
   renderPage(next);
-  fbPublish();
+  publishPageIfLeader(next);
 }
 
 function updateNavButtons() {
@@ -355,7 +368,7 @@ function renderPips() {
     const pip = document.createElement('div');
     pip.className = 'pip' + (i === state.currentPage ? ' active' : '');
     pip.dataset.i = i;
-    pip.addEventListener('click', () => { if (state.mode !== 'follower') { renderPage(i); fbPublish(); } });
+    pip.addEventListener('click', () => { if (state.mode !== 'follower') { renderPage(i); publishPageIfLeader(i); } });
     strip.appendChild(pip);
   }
   if (state.pages.length > 40) {
@@ -377,6 +390,20 @@ function changeFontSize(dir) {
   updateFontDisplay();
   saveLocalPrefs();
   setSyncedPref('font', { size: FONT_SIZES[state.fontSize].label });
+  publishDisplayIfLeader({ fontSize: FONT_SIZES[state.fontSize].label });
+}
+
+/**
+ * Follower-side mirroring only: sets font size by label (matching what
+ * realtime.js's displayState carries) WITHOUT persisting to this
+ * device's own PreferenceService and WITHOUT publishing anywhere.
+ */
+function applyFontSizeByLabel(label) {
+  const idx = FONT_SIZES.findIndex((f) => f.label === label);
+  if (idx !== -1) {
+    state.fontSize = idx;
+    updateFontDisplay();
+  }
 }
 
 function loadFontSizeFromPreferences() {
@@ -407,11 +434,7 @@ function setMode(mode, silent = false) {
     showToast(mode === 'leader' ? '🎹 Leader mode active' : '📡 Follower mode — watching leader', 'info');
   }
 
-  if (mode === 'follower' && state.fbEnabled) {
-    fbStartListening();
-  } else {
-    fbStopListening();
-  }
+  syncSessionForCurrentMode();
 }
 
 /* ----------------------------------------------------------
@@ -526,17 +549,21 @@ function updateMidiMappingInfo() {
 }
 
 /* ----------------------------------------------------------
-   FIREBASE
+   FIREBASE (modular — services/firebase/*, via window.MLFirebase)
+   ----------------------------------------------------------
+   app.js is the orchestration layer only: it never touches the
+   Firebase SDK directly. Every read/write goes through
+   session.js/realtime.js/preference.js, exposed on window.MLFirebase
+   by services/firebase/browser-bridge.js.
    ---------------------------------------------------------- */
 function isFirebaseConfigured() {
   const cfg = loadFirebaseConfig();
-  return cfg && cfg.apiKey && !cfg.apiKey.startsWith('YOUR_');
+  return !!(cfg && cfg.apiKey && !cfg.apiKey.startsWith('YOUR_'));
 }
 
 function loadFirebaseConfig() {
   const saved = localStorage.getItem('mlr_fb_config');
-  if (saved) return JSON.parse(saved);
-  return DEFAULT_FIREBASE_CONFIG;
+  return saved ? JSON.parse(saved) : null;
 }
 
 function loadFirebaseConfigToModal() {
@@ -561,10 +588,8 @@ function saveFirebaseConfig() {
   };
   localStorage.setItem('mlr_fb_config', JSON.stringify(cfg));
   closeModal();
-  // Reconnect if toggle is on
   if (state.fbEnabled) {
-    disconnectFirebase();
-    connectFirebase();
+    ensureFirebaseReady(cfg); // re-bootstrap with the freshly saved config if sync is already on
   }
   showToast('Firebase config saved!', 'success');
 }
@@ -580,109 +605,224 @@ function toggleFirebase(on) {
       openModal();
       return;
     }
-    connectFirebase();
+    ensureFirebaseReady();
   } else {
-    disconnectFirebase();
+    stopModularSync();
   }
 }
 
-function connectFirebase() {
+/**
+ * Guarantees the modular Firebase services are initialized (idempotent —
+ * see services/firebase/firebase.js's own singleton guard, so this can
+ * never create a duplicate Firebase App instance), then starts session
+ * sync for whichever mode (Leader/Follower) this device is currently in.
+ */
+function ensureFirebaseReady(explicitConfig = null) {
+  if (!window.MLFirebase || !window.MLFirebase.ensureFirebaseServices) {
+    showToast('Firebase services are still loading — try again in a moment', 'error');
+    return;
+  }
+  const ready = window.MLFirebase.ensureFirebaseServices(explicitConfig);
+  if (!ready) {
+    setPillState('fb-pill', 'error', 'Sync');
+    return;
+  }
+  showToast('Firebase connected', 'success');
+  syncSessionForCurrentMode();
+}
+
+/**
+ * Creates (Leader) or joins (Follower) the app's one shared session —
+ * see MAIN_SESSION_ID above. Waits for anonymous auth to resolve if it
+ * hasn't yet (sign-in itself is handled by browser-bridge.js).
+ */
+async function syncSessionForCurrentMode() {
+  if (!state.fbEnabled) return;
+  if (!window.MLFirebase || !window.MLFirebase.isFirebaseInitialized()) return;
+
+  const user = window.MLFirebase.getCurrentUser();
+  if (!user) {
+    const unsub = window.MLFirebase.onAuthChange((u) => {
+      if (u) { unsub(); syncSessionForCurrentMode(); }
+    });
+    return;
+  }
+
   try {
-    const cfg = loadFirebaseConfig();
-    // Destroy existing app if any
-    if (state.fbApp) {
-      state.fbApp.delete().catch(() => {});
+    setPillState('fb-pill', 'syncing', 'Sync');
+    if (state.mode === 'leader') {
+      await window.MLFirebase.createSession({ platform: detectPlatform(), label: 'Leader' }, MAIN_SESSION_ID);
+      // Immediately (re-)publish whatever is currently on stage, in case
+      // Follower devices were already connected and waiting.
+      if (state.activeSong) publishCurrentSongIfLeader(state.activeSong);
+      publishPageIfLeader(state.currentPage);
+    } else {
+      await window.MLFirebase.joinSession(MAIN_SESSION_ID, { platform: detectPlatform(), label: 'Follower' }, window.MLFirebase.ROLES.VIEWER);
     }
-    state.fbApp = firebase.initializeApp(cfg, 'mlr-' + Date.now());
-    state.fbDb  = firebase.database(state.fbApp);
     setPillState('fb-pill', 'connected', 'Sync');
-    showToast('Firebase connected', 'success');
-    if (state.mode === 'follower') fbStartListening();
+    ensurePlaybackSubscription();
+    ensureDisplaySubscription();
   } catch (err) {
     setPillState('fb-pill', 'error', 'Sync');
-    showToast('Firebase error: ' + err.message, 'error');
-    console.error('Firebase:', err);
+    showToast('Sync error: ' + err.message, 'error');
   }
 }
 
-function disconnectFirebase() {
-  fbStopListening();
-  if (state.fbApp) {
-    state.fbApp.delete().catch(() => {});
-    state.fbApp = null;
-    state.fbDb  = null;
+function stopModularSync() {
+  teardownSubscriptions();
+  if (window.MLFirebase && window.MLFirebase.getActiveSessionId()) {
+    window.MLFirebase.leaveSession();
   }
   setPillState('fb-pill', '', 'Sync');
 }
 
-function fbPublish() {
-  if (!state.fbEnabled || !state.fbDb || state.mode !== 'leader') return;
-  if (!state.activeSong) return;
-  const ref = state.fbDb.ref(FIREBASE_DB_PATH);
-  ref.set({
-    songId:    state.activeSong.id,
-    songName:  state.activeSong.name,
-    songUrl:   state.activeSong.url,
-    pageIndex: state.currentPage,
-    ts:        Date.now(),
-  });
+function detectPlatform() {
+  const ua = navigator.userAgent || '';
+  if (/android/i.test(ua)) return 'Android';
+  if (/ipad|iphone|ipod/i.test(ua)) return 'iOS';
+  if (/mobile/i.test(ua)) return 'Mobile';
+  return 'Desktop';
 }
 
-function fbStartListening() {
-  if (!state.fbDb) return;
-  fbStopListening();
-  const ref = state.fbDb.ref(FIREBASE_DB_PATH);
-  state.fbListener = ref.on('value', (snapshot) => {
-    const data = snapshot.val();
-    if (!data) return;
-    setPillState('fb-pill', 'syncing', 'Sync');
-    handleFollowerUpdate(data);
-    setTimeout(() => setPillState('fb-pill', 'connected', 'Sync'), 800);
-  });
+/* ---------------- Publish (Leader/Host only — realtime.js self-guards this too) ---------------- */
+
+function publishCurrentSongIfLeader(song) {
+  if (state.mode !== 'leader' || !state.fbEnabled) return;
+  if (!window.MLFirebase || !window.MLFirebase.getActiveSessionId()) return;
+  window.MLFirebase.setCurrentSong(song.id, song.name, song.url || null).catch(() => {});
 }
 
-function fbStopListening() {
-  if (state.fbDb && state.fbListener) {
-    state.fbDb.ref(FIREBASE_DB_PATH).off('value', state.fbListener);
-    state.fbListener = null;
+function publishPageIfLeader(pageIndex) {
+  if (state.mode !== 'leader' || !state.fbEnabled) return;
+  if (!window.MLFirebase || !window.MLFirebase.getActiveSessionId()) return;
+  window.MLFirebase.setPage(pageIndex).catch(() => {});
+}
+
+/**
+ * Publishes Theme/Font Size/Fullscreen to the shared session's
+ * displayState — used so Follower devices can mirror the Leader's
+ * stage display. Distinct from setSyncedPref() (this device's own
+ * personal PreferenceService) — both fire from the same user action,
+ * but serve different purposes (see the Complete Migration log entry).
+ */
+function publishDisplayIfLeader(partial) {
+  if (state.mode !== 'leader' || !state.fbEnabled) return;
+  if (!window.MLFirebase || !window.MLFirebase.getActiveSessionId()) return;
+  if ('theme' in partial)      window.MLFirebase.setSyncedTheme(partial.theme).catch(() => {});
+  if ('fontSize' in partial)   window.MLFirebase.setSyncedFontSize(partial.fontSize).catch(() => {});
+  if ('fullscreen' in partial) window.MLFirebase.setSyncedFullscreen(partial.fullscreen).catch(() => {});
+}
+
+/* ---------------- Play / Pause / Stop (transport, Leader/Host only) ---------------- */
+
+function playSession() {
+  state.playing = true;
+  updatePlayPauseStopUI();
+  if (state.mode === 'leader' && state.fbEnabled && window.MLFirebase && window.MLFirebase.getActiveSessionId()) {
+    window.MLFirebase.play().catch(() => {});
   }
 }
 
-async function handleFollowerUpdate(data) {
-  const { songId, songName, songUrl, pageIndex } = data;
+function pauseSession() {
+  state.playing = false;
+  updatePlayPauseStopUI();
+  if (state.mode === 'leader' && state.fbEnabled && window.MLFirebase && window.MLFirebase.getActiveSessionId()) {
+    window.MLFirebase.pause().catch(() => {});
+  }
+}
 
-  // If different song, load it
-  if (!state.activeSong || state.activeSong.id !== songId) {
-    const song = { id: songId, name: songName, url: songUrl };
+function stopSession() {
+  state.playing = false;
+  updatePlayPauseStopUI();
+  if (state.mode === 'leader' && state.fbEnabled && window.MLFirebase && window.MLFirebase.getActiveSessionId()) {
+    window.MLFirebase.stop().catch(() => {});
+  }
+}
+
+function updatePlayPauseStopUI() {
+  const playBtn  = document.getElementById('play-btn');
+  const pauseBtn = document.getElementById('pause-btn');
+  if (playBtn)  playBtn.classList.toggle('active', state.playing);
+  if (pauseBtn) pauseBtn.classList.toggle('active', !state.playing);
+}
+
+/* ---------------- Subscriptions (Follower + Leader both watch; see role-gating below) ---------------- */
+
+let unsubPlayback = null;
+let unsubDisplay  = null;
+
+function ensurePlaybackSubscription() {
+  if (unsubPlayback) return; // already subscribed — never register a second listener for the same session
+  unsubPlayback = window.MLFirebase.watchPlaybackState(handleIncomingPlaybackState);
+}
+
+function ensureDisplaySubscription() {
+  if (unsubDisplay) return;
+  unsubDisplay = window.MLFirebase.watchDisplayState(handleIncomingDisplayState);
+}
+
+function teardownSubscriptions() {
+  if (unsubPlayback) { unsubPlayback(); unsubPlayback = null; }
+  if (unsubDisplay)  { unsubDisplay();  unsubDisplay  = null; }
+}
+
+/**
+ * Follower-side: receives Leader-published playback state, updates
+ * local state, and immediately re-renders — and NEVER calls a publish
+ * function in response (no echo). Also fires for the Leader's own
+ * device (Realtime Database delivers every write back to all listeners,
+ * including the writer), which is deliberately ignored below via
+ * canControlPlayback() — the Leader already rendered its own change
+ * instantly and locally; it doesn't need to react to its own echo.
+ */
+async function handleIncomingPlaybackState(data) {
+  if (!data) return;
+  if (window.MLFirebase.canControlPlayback()) return; // this device published it — ignore the echo
+
+  state.playing = data.status === 'playing';
+  updatePlayPauseStopUI();
+
+  const { currentSongId, currentSongName, songUrl, pageIndex } = data;
+
+  if (currentSongId && (!state.activeSong || state.activeSong.id !== currentSongId)) {
     try {
-      const res  = await fetch(song.url);
-      if (!res.ok) throw new Error('Fetch failed');
-      const text = await res.text();
-      // Load without publishing back
-      state.activeSong  = song;
-      state.currentPage = 0;
-      if (text.includes('[PAGE]')) {
-        state.pages = text.split(/\[PAGE\]/i).map(c=>c.trim()).filter(Boolean);
+      let text;
+      if (songUrl) {
+        const res = await fetch(songUrl);
+        if (!res.ok) throw new Error('Fetch failed');
+        text = await res.text();
       } else {
-        let chunks = text.split(/\n\s*\n\s*\n/);
-        if (chunks.length < 2) chunks = text.split(/\n\n/);
-        state.pages = chunks.map(c=>c.trim()).filter(Boolean);
+        // No local URL — this is a Cloud Library song; resolve it from
+        // the Library cache (Phase 9) or fetch it directly.
+        const cached = libraryCache[currentSongId];
+        text = cached ? cached.text : (await window.MLFirebase.getSong(currentSongId))?.text;
       }
-      if (!state.pages.length) state.pages = [text.trim()];
-      document.getElementById('song-title-display').textContent = song.name;
-      document.getElementById('empty-state').style.display   = 'none';
-      document.getElementById('lyric-display').style.display = 'flex';
-      document.querySelectorAll('.song-item').forEach(el => {
-        el.classList.toggle('active', el.dataset.id === songId);
-      });
-      renderPips();
-    } catch {}
+      if (typeof text === 'string') {
+        applySongAndRender({ id: currentSongId, name: currentSongName, url: songUrl || null }, text);
+      }
+    } catch {
+      // Could not resolve the song text — leave the current display as-is.
+    }
   }
 
-  // Navigate to page
   if (typeof pageIndex === 'number' && state.pages.length > pageIndex && state.currentPage !== pageIndex) {
     renderPage(pageIndex);
   }
+}
+
+/**
+ * Follower-side: mirrors the Leader's Theme/Font Size/Fullscreen
+ * locally (visual only — does NOT persist to this device's own
+ * PreferenceService, and does NOT call a publish function, so it can
+ * never echo or permanently override this device's personal settings).
+ */
+function handleIncomingDisplayState(data) {
+  if (!data) return;
+  if (window.MLFirebase.canControlPlayback()) return; // ignore echo of our own publish
+
+  if (data.theme) applyThemeToDOM(data.theme);
+  if (data.fontSize) applyFontSizeByLabel(data.fontSize);
+  if (typeof data.fullscreen === 'boolean') applyFullscreenState(data.fullscreen);
 }
 
 /* ----------------------------------------------------------
@@ -827,9 +967,12 @@ lyricStage.addEventListener('click', (e) => {
 });
 
 /* ============================================================
-   PHASE: UI MODERNIZATION (added — does not modify any logic
-   above this line: playback, MIDI, and Firebase sync functions
-   are untouched byte-for-byte).
+   PHASE: UI MODERNIZATION (added on top of the original playback/MIDI
+   engine, which remains untouched — see applySongAndRender()/
+   renderPage()/navigate()/onMIDIMessage() above. The legacy Firebase
+   sync functions that used to be protected here (fbPublish/
+   fbStartListening/handleFollowerUpdate) were intentionally removed as
+   part of the Complete Migration phase — see docs/IMPLEMENTATION_LOG.md.
    ============================================================ */
 
 /* ----------------------------------------------------------
@@ -847,10 +990,10 @@ function initTheme() {
   setTheme(THEME_ORDER.includes(saved) ? saved : 'dark', true);
 }
 
-function setTheme(theme, silent = false) {
+/** Pure DOM update — no persistence, no publish. Shared by setTheme() (local user action) and the Follower display-mirroring handler. */
+function applyThemeToDOM(theme) {
   if (!THEME_ORDER.includes(theme)) return;
   document.documentElement.setAttribute('data-theme', theme);
-  setSyncedPref('theme', theme);
   const btn = document.getElementById('theme-btn');
   if (btn) {
     const meta = THEME_META[theme];
@@ -859,6 +1002,13 @@ function setTheme(theme, silent = false) {
     if (icon)  icon.textContent  = meta.icon;
     if (label) label.textContent = meta.label;
   }
+}
+
+function setTheme(theme, silent = false) {
+  if (!THEME_ORDER.includes(theme)) return;
+  applyThemeToDOM(theme);
+  setSyncedPref('theme', theme);           // this device's own personal preference
+  publishDisplayIfLeader({ theme });        // mirror to Follower devices, if Leader
   if (!silent && typeof showToast === 'function') {
     showToast(`${THEME_META[theme].label} theme`, 'info');
   }
@@ -883,6 +1033,25 @@ function toggleFullscreen() {
   }
 }
 
+/**
+ * Follower-side mirroring only, best-effort: most browsers require an
+ * actual user gesture (click/tap) to grant requestFullscreen(), so this
+ * may silently fail on a Follower device that didn't itself click
+ * anything — documented limitation, not a bug (see IMPLEMENTATION_LOG).
+ */
+function applyFullscreenState(shouldBeFullscreen) {
+  const isFull = !!(document.fullscreenElement || document.webkitFullscreenElement);
+  if (shouldBeFullscreen === isFull) return;
+  const el = document.getElementById('app') || document.documentElement;
+  try {
+    if (shouldBeFullscreen) {
+      (el.requestFullscreen || el.webkitRequestFullscreen)?.call(el);
+    } else {
+      (document.exitFullscreen || document.webkitExitFullscreen)?.call(document);
+    }
+  } catch { /* likely blocked without a user gesture — ignore */ }
+}
+
 function updateFullscreenBtn() {
   const btn = document.getElementById('fullscreen-btn');
   if (!btn) return;
@@ -893,6 +1062,16 @@ function updateFullscreenBtn() {
 
 document.addEventListener('fullscreenchange', updateFullscreenBtn);
 document.addEventListener('webkitfullscreenchange', updateFullscreenBtn);
+
+// Separate listener (does not modify the one above): publishes the
+// resulting fullscreen state if this device is the Leader — covers
+// both the toolbar button AND exiting via the Escape key.
+document.addEventListener('fullscreenchange', () => {
+  publishDisplayIfLeader({ fullscreen: !!(document.fullscreenElement || document.webkitFullscreenElement) });
+});
+document.addEventListener('webkitfullscreenchange', () => {
+  publishDisplayIfLeader({ fullscreen: !!(document.fullscreenElement || document.webkitFullscreenElement) });
+});
 
 /* ----------------------------------------------------------
    COLLAPSIBLE SIDEBAR (desktop / tablet)
@@ -1044,6 +1223,22 @@ document.addEventListener('DOMContentLoaded', () => {
    backend function names were intentionally left unchanged.
    ============================================================ */
 
+/**
+ * QA fix (production readiness review): song/collection/playlist/recent
+ * names are user-controlled (typed by any signed-in device, or derived
+ * from an imported .txt filename) and were being interpolated directly
+ * into innerHTML unescaped below — a maliciously-named entry (e.g. a
+ * file literally named "<img src=x onerror=...>.txt") could execute
+ * arbitrary script for every device that opens the Library. All
+ * dynamic name fields rendered via innerHTML in this section now pass
+ * through this escape function first.
+ */
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = String(str == null ? '' : str);
+  return div.innerHTML;
+}
+
 let libraryCache = {};
 let collectionsCache = {};
 let playlistsCache = {};
@@ -1149,7 +1344,7 @@ function renderLibrarySongsList() {
       row.className = 'library-row';
       row.innerHTML = `
         <button class="library-fav-btn ${isFav ? 'active' : ''}" title="Toggle favorite">${isFav ? '★' : '☆'}</button>
-        <span class="library-row-name">${song.name}</span>
+        <span class="library-row-name" tabindex="0" role="button" aria-label="Open ${escapeHtml(song.name)}">${escapeHtml(song.name)}</span>
         <span class="library-row-meta">${formatTimestamp(song.updatedAt)}</span>
         <div class="library-row-actions">
           <button class="edit-btn">Edit</button>
@@ -1160,6 +1355,9 @@ function renderLibrarySongsList() {
         toggleLibraryFavorite(song.id);
       });
       row.querySelector('.library-row-name').addEventListener('click', () => openSongFromLibrary(song.id));
+      row.querySelector('.library-row-name').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openSongFromLibrary(song.id); }
+      });
       row.querySelector('.open-btn').addEventListener('click', () => openSongFromLibrary(song.id));
       row.querySelector('.edit-btn').addEventListener('click', () => openEditorForSong(song.id));
       container.appendChild(row);
@@ -1203,8 +1401,9 @@ function openSongFromLibrary(songId) {
   if (!song) { showToast('Song not found in library', 'error'); return; }
 
   // Reuses the EXISTING loadLyrics() unchanged — same page-parsing,
-  // same rendering, same fbPublish() call at the end (old sync system
-  // fires exactly as it already does for any other song).
+  // same rendering, and (as of the Complete Migration phase) the same
+  // publishCurrentSongIfLeader() call at the end, via the modular
+  // realtime.js — fires exactly as it already does for any other song.
   loadLyrics({ id: songId, name: song.name }, song.text || '');
 
   if (libraryServicesAvailable()) {
@@ -1274,10 +1473,13 @@ function renderCollectionsList() {
     const row = document.createElement('div');
     row.className = 'library-row';
     row.innerHTML = `
-      <span class="library-row-name" style="cursor:pointer;">${col.name}</span>
+      <span class="library-row-name" style="cursor:pointer;" tabindex="0" role="button" aria-label="Open ${escapeHtml(col.name)}">${escapeHtml(col.name)}</span>
       <span class="library-row-meta">${count} song${count === 1 ? '' : 's'}</span>
       <div class="library-row-actions"><button class="del-btn">Delete</button></div>`;
     row.querySelector('.library-row-name').addEventListener('click', () => openCollectionDetail(id));
+    row.querySelector('.library-row-name').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openCollectionDetail(id); }
+    });
     row.querySelector('.del-btn').addEventListener('click', () => {
       if (libraryServicesAvailable()) window.MLFirebase.deleteCollection(id);
     });
@@ -1317,7 +1519,7 @@ function renderCollectionDetail(collectionId) {
   let html = '';
   songIds.forEach((sid) => {
     const song = libraryCache[sid];
-    html += `<div class="library-row"><span class="library-row-name">${song ? song.name : sid}</span>
+    html += `<div class="library-row"><span class="library-row-name">${escapeHtml(song ? song.name : sid)}</span>
       <div class="library-row-actions"><button data-remove="${sid}">Remove</button></div></div>`;
   });
 
@@ -1325,7 +1527,7 @@ function renderCollectionDetail(collectionId) {
   html += `<div class="library-toolbar-row" style="margin-top:10px;">
       <select id="collection-add-select" class="library-search">
         <option value="">Add a song…</option>
-        ${remaining.map(([sid, s]) => `<option value="${sid}">${s.name}</option>`).join('')}
+        ${remaining.map(([sid, s]) => `<option value="${sid}">${escapeHtml(s.name)}</option>`).join('')}
       </select>
       <button class="btn-primary" style="margin:0;" id="collection-add-btn">Add</button>
     </div>`;
@@ -1360,10 +1562,13 @@ function renderPlaylistsList() {
     const row = document.createElement('div');
     row.className = 'library-row';
     row.innerHTML = `
-      <span class="library-row-name" style="cursor:pointer;">${pl.name}</span>
+      <span class="library-row-name" style="cursor:pointer;" tabindex="0" role="button" aria-label="Open ${escapeHtml(pl.name)}">${escapeHtml(pl.name)}</span>
       <span class="library-row-meta">${count} song${count === 1 ? '' : 's'}</span>
       <div class="library-row-actions"><button class="del-btn">Delete</button></div>`;
     row.querySelector('.library-row-name').addEventListener('click', () => openPlaylistDetail(id));
+    row.querySelector('.library-row-name').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openPlaylistDetail(id); }
+    });
     row.querySelector('.del-btn').addEventListener('click', () => {
       if (libraryServicesAvailable()) window.MLFirebase.deleteSetlist(id);
     });
@@ -1404,7 +1609,7 @@ function renderPlaylistDetail(playlistId) {
   songIds.forEach((sid, i) => {
     const song = libraryCache[sid];
     html += `<div class="library-row">
-      <span class="library-row-name">${song ? song.name : sid}</span>
+      <span class="library-row-name">${escapeHtml(song ? song.name : sid)}</span>
       <div class="library-row-actions">
         <button class="reorder-btn" data-up="${i}" ${i === 0 ? 'disabled' : ''}>↑</button>
         <button class="reorder-btn" data-down="${i}" ${i === songIds.length - 1 ? 'disabled' : ''}>↓</button>
@@ -1416,7 +1621,7 @@ function renderPlaylistDetail(playlistId) {
   html += `<div class="library-toolbar-row" style="margin-top:10px;">
       <select id="playlist-add-select" class="library-search">
         <option value="">Add a song…</option>
-        ${remaining.map(([sid, s]) => `<option value="${sid}">${s.name}</option>`).join('')}
+        ${remaining.map(([sid, s]) => `<option value="${sid}">${escapeHtml(s.name)}</option>`).join('')}
       </select>
       <button class="btn-primary" style="margin:0;" id="playlist-add-btn">Add</button>
     </div>`;
@@ -1535,9 +1740,12 @@ function renderRecentList() {
   recents.forEach((r) => {
     const row = document.createElement('div');
     row.className = 'library-row';
-    row.innerHTML = `<span class="library-row-name" style="cursor:pointer;">${r.name}</span>
+    row.innerHTML = `<span class="library-row-name" style="cursor:pointer;" tabindex="0" role="button" aria-label="Open ${escapeHtml(r.name)}">${escapeHtml(r.name)}</span>
       <span class="library-row-meta">${formatTimestamp(r.openedAt)}</span>`;
     row.querySelector('.library-row-name').addEventListener('click', () => openSongFromLibrary(r.songId));
+    row.querySelector('.library-row-name').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openSongFromLibrary(r.songId); }
+    });
     container.appendChild(row);
   });
 }

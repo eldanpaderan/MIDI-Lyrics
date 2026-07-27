@@ -11,10 +11,10 @@
  *   window.MLFirebase.createSession({ platform: 'laptop' })
  *   window.MLFirebase.watchPlaybackState(state => console.log(state))
  *
- * This file does not call or modify anything in app.js. Wiring the
- * existing Leader/Follower UI to actually use this session-based system
- * (instead of the old fbPublish/fbStartListening path) is a separate,
- * not-yet-started phase — see docs/IMPLEMENTATION_LOG.md.
+ * As of the Complete Migration phase, app.js's Leader/Follower UI now
+ * exclusively uses this modular system (session.js/realtime.js) for
+ * synchronization — the legacy fbPublish/fbStartListening path has been
+ * removed from app.js entirely. See docs/IMPLEMENTATION_LOG.md.
  */
 import * as MLFirebase from './index.js';
 
@@ -49,15 +49,27 @@ function readSavedConfig() {
   }
 }
 
-function bootstrapFirebaseServices() {
+/**
+ * Guarded Firebase services bootstrap — safe to call as many times as
+ * needed (e.g. once automatically at page load if sync was already
+ * enabled, and again from app.js right after the person saves/enables
+ * Firebase config in the UI). initFirebase() itself is idempotent
+ * (services/firebase/firebase.js), so calling this repeatedly never
+ * creates a second Firebase App instance — "Firebase must initialize
+ * only once" is enforced there, not by guessing here whether it's safe
+ * to call.
+ * @param {object} [explicitConfig] - pass the just-saved config directly to avoid a redundant localStorage read-after-write
+ * @returns {boolean} true if the services are (now) initialized, false if not configured/enabled
+ */
+function bootstrapFirebaseServices(explicitConfig = null) {
   const syncEnabled = localStorage.getItem(ENABLED_KEY) === 'true';
-  const cfg = readSavedConfig();
+  const cfg = explicitConfig || readSavedConfig();
   if (!syncEnabled || !cfg) {
     // Nothing to do yet — stays dormant until the person configures AND
     // enables Firebase sync via the existing sidebar toggle/modal.
-    return;
+    return false;
   }
-  if (MLFirebase.isFirebaseInitialized()) return;
+  if (MLFirebase.isFirebaseInitialized()) return true;
 
   try {
     MLFirebase.initFirebase(cfg);
@@ -74,12 +86,19 @@ function bootstrapFirebaseServices() {
         });
       }
     });
+    return true;
   } catch (err) {
     console.error('[services/firebase] Bootstrap failed:', err);
+    return false;
   }
 }
 
 bootstrapFirebaseServices();
+
+// Exposed so app.js (the orchestration layer) can (re-)run this guarded
+// bootstrap after the person saves/enables Firebase config at runtime,
+// without ever calling the Firebase SDK directly itself.
+window.MLFirebase.ensureFirebaseServices = bootstrapFirebaseServices;
 
 /**
  * --- Fix for audit finding H2 (script execution order) ------------

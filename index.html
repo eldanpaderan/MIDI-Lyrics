@@ -9,7 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=DM+Serif+Display:ital@0;1&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet" />
 <link rel="stylesheet" href="styles.css" />
 
-<!-- Firebase SDK v9.22.0 (compat) via CDN — unchanged, + Auth added for the new services layer -->
+<!-- Firebase SDK v9.22.0 (compat) via CDN — underlies services/firebase/firebase.js + auth.js. app.js no longer calls this SDK directly (see the Complete Migration log entry). -->
 <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-database-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-auth-compat.js"></script>
@@ -190,6 +190,15 @@
       </div>
     </div>
     <div id="nav-controls">
+      <button class="nav-btn" id="play-btn" onclick="playSession()" title="Play (session status)">
+        <svg viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+      </button>
+      <button class="nav-btn" id="pause-btn" onclick="pauseSession()" title="Pause (session status)">
+        <svg viewBox="0 0 24 24"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+      </button>
+      <button class="nav-btn" id="stop-btn" onclick="stopSession()" title="Stop (session status)">
+        <svg viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14"/></svg>
+      </button>
       <button class="nav-btn" id="prev-btn" onclick="navigate(-1)" disabled>
         <svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg>
         Prev
