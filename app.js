@@ -618,10 +618,36 @@ function toggleFirebase(on) {
  * sync for whichever mode (Leader/Follower) this device is currently in.
  */
 function ensureFirebaseReady(explicitConfig = null) {
-  if (!window.MLFirebase || !window.MLFirebase.ensureFirebaseServices) {
-    showToast('Firebase services are still loading — try again in a moment', 'error');
+  if (window.MLFirebase && window.MLFirebase.ensureFirebaseServices) {
+    proceedWithFirebaseReady(explicitConfig);
     return;
   }
+
+  // The modular services module (services/firebase/browser-bridge.js)
+  // hasn't finished loading/evaluating yet. Rather than failing outright
+  // and asking the person to manually retry, actually WAIT for it using
+  // the MLFirebaseReady event that browser-bridge.js dispatches once
+  // window.MLFirebase is fully attached. A timeout safety net still
+  // surfaces a real error if the module genuinely never loads (network
+  // failure, blocked request, etc.), instead of waiting forever with no
+  // feedback.
+  setPillState('fb-pill', 'syncing', 'Sync');
+
+  const onReady = () => {
+    window.removeEventListener('MLFirebaseReady', onReady);
+    clearTimeout(timeoutId);
+    proceedWithFirebaseReady(explicitConfig);
+  };
+  window.addEventListener('MLFirebaseReady', onReady);
+
+  const timeoutId = setTimeout(() => {
+    window.removeEventListener('MLFirebaseReady', onReady);
+    setPillState('fb-pill', 'error', 'Sync');
+    showToast('Firebase services failed to load — check your connection and refresh the page', 'error');
+  }, 8000);
+}
+
+function proceedWithFirebaseReady(explicitConfig) {
   const ready = window.MLFirebase.ensureFirebaseServices(explicitConfig);
   if (!ready) {
     setPillState('fb-pill', 'error', 'Sync');

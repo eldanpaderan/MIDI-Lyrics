@@ -579,3 +579,46 @@ Exactly as diagnosed: the modular architecture (Phases 2–11) was fully built a
 - **Realtime Database security rules** are still not shipped in this repository (see `FIREBASE_SETUP.md`) — role checks remain application-level only.
 
 **This completes the migration.** The application now uses exclusively the modular Firebase architecture for all synchronization; the legacy system no longer exists in the codebase.
+
+---
+
+## Phase 14 — Migration Completion Verification & "Still Loading" Fix
+
+**Date:** 2026-07-25
+
+**Phase:** Re-verify the entire modular Firebase migration end-to-end per a detailed re-audit request, and fix any genuine remaining gap. No new features, no unrelated redesign, no architecture change beyond completing what was already in progress.
+
+**Analysis performed before any change (as required):** every file listed was individually re-inspected — `index.html`'s module imports, `browser-bridge.js`, `firebase.js`, `auth.js`, `session.js`, `realtime.js`, `preference.js`, `index.js`, and `app.js` — specifically checking import paths, exports, ES Module correctness, GitHub Pages compatibility, whether `browser-bridge.js` is actually loaded, whether `window.MLFirebase` is correctly exposed, and whether `app.js` waits for Firebase initialization.
+
+**Finding: most of the reported symptoms were already resolved by the Phase 13 Complete Migration** — re-confirmed via fresh, independent checks (not assumed from memory):
+- Exactly one Firebase initialization path exists (`services/firebase/firebase.js`'s `initFirebase()`), called from exactly one place (`browser-bridge.js`) — re-confirmed via grep across the whole repo.
+- Zero legacy Firebase code remains in `app.js` — re-confirmed via grep; all remaining matches for legacy names are explanatory comments, not executable code.
+- `app.js` contains zero direct Firebase SDK calls (no `.ref(`, `.database()`, `firebase.initializeApp`) — confirmed orchestration-only, as required.
+- Every import path in every `services/firebase/*.js` file resolves to a real file; every named import resolves to a real export — re-confirmed via a full cross-check script.
+- Checked every module's top-level (module-evaluation-time) code for anything that could throw synchronously and break the entire `import * as MLFirebase from './index.js'` chain in `browser-bridge.js` (which would leave `window.MLFirebase` permanently undefined, exactly matching the reported symptom) — found nothing: the one top-level function call in the chain (`realtime.js`'s `onSessionChange(...)`, itself imported from `session.js`) is guaranteed safe by ES Module evaluation order (`session.js` fully evaluates before `realtime.js`, since `realtime.js` statically imports from it), and `preference.js`'s top-level `readLocal()` call is already wrapped in try/catch.
+
+**Genuine gap found and fixed:** `app.js`'s `ensureFirebaseReady()` checked whether `window.MLFirebase.ensureFirebaseServices` existed exactly once, synchronously, and — if the modular services module hadn't finished loading/evaluating yet — immediately gave up and showed the "Firebase services are still loading — try again in a moment" error toast, requiring the person to manually retry. This is the literal, direct source of that message. While ES Module execution-order guarantees (deferred module scripts fully execute before `DOMContentLoaded` fires) make this unlikely to trigger during normal page-load-driven calls, it remains a real gap against the explicit requirement "app.js waits for Firebase initialization before enabling synchronization" — a one-shot check-and-fail is not the same as waiting.
+
+**Files Modified:**
+- `app.js` — `ensureFirebaseReady()` now genuinely **waits** using the `MLFirebaseReady` custom event (built during an earlier audit-fix phase specifically for this purpose, but never actually consumed anywhere until now) instead of failing outright. If the modular services aren't ready yet, it shows a "syncing" status and listens for `MLFirebaseReady`, proceeding automatically the moment it fires — with an 8-second timeout safety net that surfaces a real, clear error only if the module genuinely never loads (e.g. network failure), instead of waiting forever with no feedback. The retry logic is extracted into a new small `proceedWithFirebaseReady()` helper, shared by both the immediate-ready and the wait-then-ready paths.
+- `docs/IMPLEMENTATION_LOG.md` — this entry.
+
+**Files NOT modified:** `index.html`, `styles.css`, all of `services/firebase/*.js` — re-verified correct as-is, no changes needed.
+
+**Legacy Code Removed:** none remained to remove — this was fully completed in Phase 13, re-confirmed here.
+
+**New Integration Points:** none beyond the `ensureFirebaseReady()`/`proceedWithFirebaseReady()` refinement above — this phase completes robustness on an existing integration point rather than adding a new one.
+
+**Synchronization Flow:** unchanged from Phase 13 — Leader publishes via `publishCurrentSongIfLeader()`/`publishPageIfLeader()`/`publishDisplayIfLeader()`/`play()`/`pause()`/`stop()`; Followers consume via `handleIncomingPlaybackState()`/`handleIncomingDisplayState()`, which update local state and immediately re-render, and never call a publish function. Re-verified this remains intact and untouched by this phase's fix.
+
+**Testing Performed:**
+- `node --check` on `app.js` — passes.
+- Confirmed no duplicate function declarations were introduced.
+- Confirmed the new `MLFirebaseReady` listener add/remove is balanced (added once, removed on both the success path and the timeout path — no leak).
+- Full `getElementById`/`onclick` cross-check between `app.js` and `index.html` — all resolve.
+- Hash comparison confirming `renderPage`, `onMIDIMessage`, `initMIDI` (async), `renderSetlist`, and `applySongAndRender` remain exactly as they were after Phase 13 — this phase touched only the one function described above.
+- **Caveat, unchanged from every prior phase:** no live browser is available in this sandbox, so the actual multi-device Leader→Follower sync workflow, and the specific "still loading" scenario itself, could not be reproduced and confirmed fixed in a real browser. The fix is a well-justified robustness improvement (turning a fragile one-shot check into a proper wait) based on thorough static analysis, not a confirmed live reproduction-and-fix.
+
+**Remaining Known Issues (unchanged from Phase 13):** no live multi-device test has been performed in any phase; Realtime Database security rules are not shipped in this repository; fullscreen mirroring on Follower devices remains best-effort due to browser user-gesture requirements; no mutual exclusivity exists for multiple simultaneous Leaders (inherited, documented behavior).
+
+**Migration status: complete**, as of Phase 13, with this phase adding one targeted robustness fix rather than finding the migration itself to be incomplete.
