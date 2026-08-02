@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>MIDI Lyrics Reader</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=DM+Serif+Display:ital@0;1&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="styles.css" />
+
+<!-- Firebase SDK v9.22.0 (compat) via CDN — underlies services/firebase/firebase.js + auth.js. app.js no longer calls this SDK directly (see the Complete Migration log entry). -->
+<script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-database-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-auth-compat.js"></script>
+</head>
+<body>
+
+<!-- Follower banner -->
+<div id="follower-banner">🔴 FOLLOWER MODE — synced to leader</div>
+
+<!-- App Shell -->
+<div id="app">
+
+  <!-- Top Bar / Toolbar -->
+  <header id="topbar">
+    <button id="burger-btn" aria-label="Toggle menu" onclick="toggleDrawer()">
+      <span></span><span></span><span></span>
+    </button>
+
+    <button class="icon-btn" id="sidebar-collapse-btn" title="Collapse sidebar" onclick="toggleSidebarCollapse()">
+      <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="9" y1="4" x2="9" y2="20"/></svg>
+    </button>
+
+    <div id="app-title">MIDI <em>Lyrics</em></div>
+
+    <div class="topbar-spacer"></div>
+
+    <div class="toolbar-group">
+      <!-- Theme -->
+      <button class="icon-btn" id="theme-btn" title="Cycle theme (T)" onclick="cycleTheme()">
+        <span class="theme-icon">🌙</span><span class="theme-label">Dark</span>
+      </button>
+
+      <!-- Fullscreen -->
+      <button class="icon-btn" id="fullscreen-btn" title="Toggle fullscreen (F)" onclick="toggleFullscreen()">
+        <svg viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3"/></svg>
+      </button>
+
+      <!-- Wake Lock -->
+      <button class="icon-btn" id="wake-btn" title="Keep screen awake" onclick="toggleWakeLock()">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
+      </button>
+
+      <!-- Settings -->
+      <!-- Cloud Song Library -->
+      <button class="icon-btn" id="library-btn" title="Song Library" onclick="openLibraryModal()">
+        <svg viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+      </button>
+
+      <button class="icon-btn" id="settings-btn" title="Firebase config" onclick="openModal()">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <!-- Main -->
+  <div id="main">
+
+    <!-- Drawer overlay (mobile) -->
+    <div id="drawer-overlay" onclick="toggleDrawer()"></div>
+
+    <!-- Sidebar -->
+    <aside id="sidebar">
+
+      <!-- Mode -->
+      <div class="sidebar-section">
+        <div class="sidebar-label">Role</div>
+        <div class="mode-toggle">
+          <button class="mode-btn active" id="mode-leader" onclick="setMode('leader')">🎹 Leader</button>
+          <button class="mode-btn" id="mode-follower" onclick="setMode('follower')">📡 Follower</button>
+        </div>
+      </div>
+
+      <!-- Font Size / Auto-fit -->
+      <div class="sidebar-section">
+        <div class="sidebar-label">Display</div>
+        <div class="ctrl-row">
+          <span class="ctrl-label">Font size</span>
+          <span class="ctrl-val" id="font-size-label">M</span>
+          <div class="btn-group">
+            <button class="sm-btn" onclick="changeFontSize(-1)" title="Smaller">−</button>
+            <button class="sm-btn" onclick="changeFontSize(1)"  title="Larger">+</button>
+          </div>
+        </div>
+        <div class="toggle-wrap">
+          <label class="toggle">
+            <input type="checkbox" id="autofit-toggle" onchange="toggleAutoFit(this.checked)" />
+            <span class="toggle-slider"></span>
+          </label>
+          <span class="toggle-label">Auto-fit lyrics to screen</span>
+        </div>
+      </div>
+
+      <!-- MIDI Controls -->
+      <div class="sidebar-section">
+        <div class="sidebar-label">MIDI</div>
+        <div style="margin-bottom:8px;">
+          <button id="midi-learn-btn" onclick="toggleMidiLearn()">
+            <span class="btn-dot"></span>
+            <span id="midi-learn-label">MIDI Learn: OFF</span>
+          </button>
+        </div>
+        <div style="font-size:0.72rem; color:var(--text-muted); line-height:1.6;" id="midi-mapping-info">
+          Next: <span id="midi-next-map" style="color:var(--text-secondary)">Not assigned</span><br>
+          Prev: <span id="midi-prev-map" style="color:var(--text-secondary)">Not assigned</span>
+        </div>
+        <div style="margin-top:8px; display:flex; gap:6px;">
+          <button class="sm-btn" style="width:auto;padding:0 8px;font-size:0.68rem;height:24px;" onclick="clearMidiMapping()">Clear</button>
+        </div>
+      </div>
+
+      <!-- Firebase -->
+      <div class="sidebar-section">
+        <div class="sidebar-label">Firebase Sync</div>
+        <div class="toggle-wrap" style="margin-bottom:10px;">
+          <label class="toggle">
+            <input type="checkbox" id="fb-toggle" onchange="toggleFirebase(this.checked)" />
+            <span class="toggle-slider"></span>
+          </label>
+          <span class="toggle-label">Enable real-time sync</span>
+        </div>
+        <button class="config-btn" onclick="openModal()">
+          ⚙ Configure Firebase
+        </button>
+      </div>
+
+      <!-- Setlist -->
+      <div class="sidebar-label" style="padding: 14px 14px 6px; flex-shrink:0;">Setlist</div>
+      <div style="padding:0 14px 8px; flex-shrink:0;">
+        <button class="config-btn" onclick="loadSongList()">
+          ↻ Refresh Songs
+        </button>
+      </div>
+      <div id="setlist-container">
+        <div class="setlist-empty" id="setlist-placeholder">
+          <div class="icon">🎵</div>
+          <p>Add <code style="font-size:0.75rem;background:var(--bg-card);padding:2px 5px;border-radius:4px;">.txt</code> files to your <code style="font-size:0.75rem;background:var(--bg-card);padding:2px 5px;border-radius:4px;">songs/</code> folder and click Refresh.</p>
+        </div>
+      </div>
+
+    </aside>
+
+    <!-- Lyric Canvas (Large Lyrics Viewer) -->
+    <main id="canvas">
+      <div id="lyric-stage">
+        <!-- Empty state -->
+        <div id="empty-state">
+          <div class="big-icon">🎹</div>
+          <h2>Select a Song</h2>
+          <p>Choose a song from the setlist sidebar to start. Use MIDI pedals or the buttons below to navigate pages.</p>
+        </div>
+
+        <!-- Lyric display -->
+        <div id="lyric-display" style="display:none;">
+          <pre id="lyric-text"></pre>
+        </div>
+      </div>
+    </main>
+
+  </div><!-- #main -->
+
+  <!-- Bottom Playback Status Bar -->
+  <footer id="bottom-bar">
+    <div id="pip-strip"></div>
+    <div id="status-row">
+      <span id="song-title-display">— No song selected —</span>
+      <span id="page-counter">— / —</span>
+
+      <!-- MIDI Status -->
+      <div class="status-pill" id="midi-pill">
+        <div class="dot"></div>
+        <span class="label">MIDI</span>
+      </div>
+
+      <!-- Firebase Status -->
+      <div class="status-pill" id="fb-pill">
+        <div class="dot"></div>
+        <span class="label">Sync</span>
+      </div>
+    </div>
+    <div id="nav-controls">
+      <button class="nav-btn" id="play-btn" onclick="playSession()" title="Play (session status)">
+        <svg viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+      </button>
+      <button class="nav-btn" id="pause-btn" onclick="pauseSession()" title="Pause (session status)">
+        <svg viewBox="0 0 24 24"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+      </button>
+      <button class="nav-btn" id="stop-btn" onclick="stopSession()" title="Stop (session status)">
+        <svg viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14"/></svg>
+      </button>
+      <button class="nav-btn" id="prev-btn" onclick="navigate(-1)" disabled>
+        <svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg>
+        Prev
+      </button>
+      <button class="nav-btn next-btn" id="next-btn" onclick="navigate(1)" disabled>
+        Next
+        <svg viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+      </button>
+    </div>
+  </footer>
+
+</div><!-- #app -->
+
+<!-- ============================================================
+     CLOUD SONG LIBRARY (new — Firebase-backed, coexists alongside
+     the existing GitHub-folder setlist; does not replace it)
+     ============================================================ -->
+<div id="library-modal-overlay" onclick="closeLibraryModalOutside(event)">
+  <div id="library-modal-box">
+    <div class="library-modal-header">
+      <h3>Song Library</h3>
+      <button class="icon-btn" onclick="closeLibraryModal()" title="Close">
+        <svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+
+    <div class="library-tabs">
+      <button class="library-tab active" data-tab="songs" onclick="switchLibraryTab('songs')">Songs</button>
+      <button class="library-tab" data-tab="collections" onclick="switchLibraryTab('collections')">Collections</button>
+      <button class="library-tab" data-tab="playlists" onclick="switchLibraryTab('playlists')">Playlists</button>
+      <button class="library-tab" data-tab="recent" onclick="switchLibraryTab('recent')">Recent</button>
+    </div>
+
+    <!-- SONGS TAB -->
+    <div class="library-panel active" id="library-panel-songs">
+      <div class="library-toolbar-row">
+        <input type="text" id="library-search-input" class="library-search" placeholder="Search songs or lyrics…" oninput="handleLibrarySearch(this.value)" />
+        <label class="btn-primary library-import-btn" style="margin:0;">
+          + Import .txt
+          <input type="file" id="library-import-file" accept=".txt" style="display:none;" onchange="handleImportTxt(this)" />
+        </label>
+      </div>
+      <div id="library-songs-list" class="library-list">
+        <div class="library-empty">No songs yet. Import a .txt file to add your first cloud song.</div>
+      </div>
+    </div>
+
+    <!-- COLLECTIONS TAB -->
+    <div class="library-panel" id="library-panel-collections">
+      <div class="library-toolbar-row">
+        <input type="text" id="new-collection-name" class="library-search" placeholder="New collection name…" />
+        <button class="btn-primary library-import-btn" style="margin:0;" onclick="createNewCollection()">+ Create</button>
+      </div>
+      <div id="library-collections-list" class="library-list">
+        <div class="library-empty">No collections yet.</div>
+      </div>
+      <div id="collection-detail-view" style="display:none;">
+        <button class="btn-ghost" style="margin-bottom:10px;" onclick="closeCollectionDetail()">← Back to Collections</button>
+        <h4 id="collection-detail-title"></h4>
+        <div id="collection-detail-songs" class="library-list"></div>
+      </div>
+    </div>
+
+    <!-- PLAYLISTS TAB -->
+    <div class="library-panel" id="library-panel-playlists">
+      <div class="library-toolbar-row">
+        <input type="text" id="new-playlist-name" class="library-search" placeholder="New playlist name…" />
+        <button class="btn-primary library-import-btn" style="margin:0;" onclick="createNewPlaylist()">+ Create</button>
+      </div>
+      <div id="library-playlists-list" class="library-list">
+        <div class="library-empty">No playlists yet.</div>
+      </div>
+      <div id="playlist-detail-view" style="display:none;">
+        <button class="btn-ghost" style="margin-bottom:10px;" onclick="closePlaylistDetail()">← Back to Playlists</button>
+        <div class="library-toolbar-row">
+          <h4 id="playlist-detail-title" style="flex:1;"></h4>
+          <button class="btn-primary" style="margin:0;" onclick="playCurrentPlaylist()">▶ Play All</button>
+        </div>
+        <div id="playlist-detail-songs" class="library-list"></div>
+      </div>
+    </div>
+
+    <!-- RECENT TAB -->
+    <div class="library-panel" id="library-panel-recent">
+      <div id="library-recent-list" class="library-list">
+        <div class="library-empty">No recently opened songs yet.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- LYRICS EDITOR -->
+<div id="editor-modal-overlay" onclick="closeEditorModalOutside(event)">
+  <div id="editor-modal-box">
+    <div class="library-modal-header">
+      <h3 id="editor-song-title">Edit Lyrics</h3>
+      <button class="icon-btn" onclick="closeEditorModal()" title="Close">
+        <svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div id="editor-meta" class="editor-meta"></div>
+    <textarea id="editor-textarea" class="editor-textarea" spellcheck="false" oninput="handleEditorInput()"></textarea>
+    <div class="editor-footer">
+      <span id="editor-save-status" class="editor-save-status">Saved</span>
+      <button class="btn-primary" style="margin:0;" onclick="openEditingSongOnStage()">Open on Stage</button>
+    </div>
+  </div>
+</div>
+
+
+<!-- Firebase Config Modal -->
+<div id="modal-overlay" onclick="closeModalOutside(event)">
+  <div id="modal-box">
+    <h3>Firebase Configuration</h3>
+    <p class="modal-sub">
+      Paste your Firebase project credentials below. These are saved in <code style="font-size:0.75rem;background:var(--bg-card);padding:2px 5px;border-radius:4px;">localStorage</code> on this device only.
+    </p>
+    <div class="field-group">
+      <label>API Key</label>
+      <input type="text" id="cfg-apiKey" placeholder="AIzaSy..." />
+    </div>
+    <div class="field-group">
+      <label>Auth Domain</label>
+      <input type="text" id="cfg-authDomain" placeholder="your-app.firebaseapp.com" />
+    </div>
+    <div class="field-group">
+      <label>Database URL</label>
+      <input type="text" id="cfg-databaseURL" placeholder="https://your-app-default-rtdb.firebaseio.com" />
+    </div>
+    <div class="field-group">
+      <label>Project ID</label>
+      <input type="text" id="cfg-projectId" placeholder="your-app" />
+    </div>
+    <div class="field-group">
+      <label>App ID</label>
+      <input type="text" id="cfg-appId" placeholder="1:123456:web:abc..." />
+    </div>
+    <div class="modal-actions">
+      <button class="btn-ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn-primary" onclick="saveFirebaseConfig()">Save & Connect</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast container -->
+<div id="toast-container"></div>
+
+<!-- ============================================================
+     NEW: Firebase services layer (services/firebase/) — native ES
+     modules, no bundler required. Loaded before app.js but does not
+     call into it; only exposes window.MLFirebase for future wiring.
+     ============================================================ -->
+<script type="module" src="services/firebase/browser-bridge.js"></script>
+
+<!-- ============================================================
+     JAVASCRIPT (classic script — functions remain global so
+     existing onclick="..." attributes keep working unchanged)
+     ============================================================ -->
+<script type="module" src="app.js"></script>
+</body>
+</html>
