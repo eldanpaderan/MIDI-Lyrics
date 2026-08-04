@@ -833,3 +833,37 @@ Rather than inspecting the code by eye, this was exercised end-to-end against a 
 - `services/firebase/firebase.js` — added diagnostics only (see above).
 - `services/firebase/auth.js` — added diagnostics only to `signInAnonymously()`.
 - No other files touched; no writes anywhere else in the codebase needed individual instrumentation because the `Reference.prototype` patch covers them all.
+
+---
+
+## Synchronization Lifecycle Audit (9-Step Trail)
+
+Diagnostics-only — no redesign, no refactor. Every function keeps its exact original signature, return value, and Promise resolve/reject behavior. New file: `services/firebase/sync-audit-log.js` (pure console-formatting helpers, no side effects). All other changes are small additive instrumentation at the true single-source-of-implementation for each step.
+
+### Why "Firebase connected" can show while Sync stays disconnected
+`initializeApp()` only validates a config object's *shape* locally — it does not verify the `databaseURL` is reachable, that anonymous auth is enabled, or that security rules allow anything. "Firebase connected" (in `services/ui/settings.js`'s `proceedWithFirebaseReady()`) fires the moment `ensureFirebaseServices()` returns `true`, which only means steps 1–2's *bootstrap call* didn't throw synchronously — it does **not** wait for `syncSessionForCurrentMode()` (steps 4–9) to actually finish, since that call is fire-and-forget. Any failure from Step 3 onward is therefore invisible to that toast by construction.
+
+### A genuine, previously-invisible bug found during this audit
+`services/firebase/realtime.js`'s `watchPlaybackState()` and `watchDisplayState()` called `ref.on('value', handler)` with **no third (cancel/error) argument**. In the Realtime Database compat SDK, a security-rules read denial on a listener without a cancel callback fails **completely silently** — no console output, no thrown error, nothing anywhere in the app. This is very likely the actual root cause of "toast says connected, pill stays red, database root looks empty/incomplete": the write side (session + presence) can succeed while the *read/listen* side is quietly rejected by rules, so nothing ever visibly syncs. Both functions now pass an explicit cancel callback — this is additive (it does not change the success path at all) but it also fixes the silent-failure behavior itself, since surfacing it necessarily required adding the missing callback.
+
+### The 9 steps, where each is now verified, and its exact failure format
+1. **Firebase initialized** — `services/firebase/firebase.js`, `initFirebase()`, wraps the real `window.firebase.initializeApp(config)` call.
+2. **Anonymous Authentication completed** — `services/firebase/auth.js`, `signInAnonymously()` (the true single implementation both the internal bootstrap call and `window.MLFirebase.signInAnonymously()` resolve to).
+3. **Database connection established** — `services/firebase/firebase.js`, new `watchDatabaseConnectionDiagnostic()`, watches the special `.info/connected` path (the only real way to know the websocket is actually live — distinct from step 1).
+4. **Session created** — `services/firebase/session.js`, `createSession()` / `joinSession()`.
+5. **Presence written** — `services/firebase/session.js`, `registerDevice()`.
+6. **Listener attached** — `services/firebase/realtime.js`, `watchPlaybackState()` / `watchDisplayState()` (now with the previously-missing cancel callback).
+7. **Leader publish enabled** — `services/ui/settings.js`, `syncSessionForCurrentMode()`, checks `canControlPlayback()` immediately after `createSession()` resolves for Leader mode.
+8. **Follower listener enabled** — same location, plus the Follower-role branch of Step 6's cancel callback in `realtime.js`.
+9. **Sync indicator updated** — `services/ui/settings.js`, `syncSessionForCurrentMode()`'s success/catch paths, alongside the existing `setPillState()` calls.
+
+Every step prints `PASS` or, on `FAIL`, the exact function, exact database path, exact Firebase error (`code`/`message`), and exact reason — via `syncAuditPass()`/`syncAuditFail()` in the new `sync-audit-log.js`.
+
+### Verification
+Exercised against a fuller fake Firebase compat SDK (Node + jsdom) supporting sessions, presence, `.info/connected`, and listener cancellation:
+- **Scenario A (healthy Leader flow):** Steps 1 → 2 → 3 → 4/5 → 6 all fired `PASS`, in the real code, with real (fake-SDK) data — `canControlPlayback()` correctly `true`, listener correctly received data.
+- **Scenario B (simulated security-rules denial on the `playbackState` listener):** Steps 1–5 still `PASS` (writes succeeded), but Step 6 correctly fired `FAIL` with the exact function (`watchPlaybackState()`), exact path (`sessions/mlr-main-session/playbackState`), exact error (`PERMISSION_DENIED: Permission denied`), and exact reason — reproducing precisely the "writes succeed, listener silently dies" failure mode this audit was meant to catch.
+
+### Files Changed
+- New: `services/firebase/sync-audit-log.js`.
+- Extended (diagnostics only, plus the one behavioral fix noted above — adding the missing `.on()` cancel callback): `services/firebase/firebase.js`, `services/firebase/auth.js`, `services/firebase/session.js`, `services/firebase/realtime.js`, `services/ui/settings.js`.
