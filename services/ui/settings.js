@@ -26,6 +26,7 @@ import { applyFontSizeByLabel } from './viewer.js';
 import { showToast, detectPlatform } from '../utils/helpers.js';
 import { saveLocalPrefs } from '../utils/storage.js';
 import { libraryCache } from './dialogs.js';
+import { syncAuditPass, syncAuditFail } from '../firebase/sync-audit-log.js';
 
 /**
  * Since this app has no session-ID entry UI (Leader/Follower is a
@@ -159,11 +160,18 @@ function proceedWithFirebaseReady(explicitConfig) {
  * hasn't yet (sign-in itself is handled by browser-bridge.js).
  */
 export async function syncSessionForCurrentMode() {
-  if (!state.fbEnabled) return;
-  if (!window.MLFirebase || !window.MLFirebase.isFirebaseInitialized()) return;
+  if (!state.fbEnabled) {
+    console.log('[Sync Audit] syncSessionForCurrentMode() exited early — Firebase Sync is toggled off (state.fbEnabled is false). No session/presence/listener steps were attempted.');
+    return;
+  }
+  if (!window.MLFirebase || !window.MLFirebase.isFirebaseInitialized()) {
+    console.log('[Sync Audit] syncSessionForCurrentMode() exited early — window.MLFirebase is not initialized yet. No session/presence/listener steps were attempted.');
+    return;
+  }
 
   const user = window.MLFirebase.getCurrentUser();
   if (!user) {
+    console.log('[Sync Audit] syncSessionForCurrentMode() is waiting — no signed-in user yet (Step 2, Anonymous Authentication, has not resolved). Will automatically retry once auth completes.');
     const unsub = window.MLFirebase.onAuthChange((u) => {
       if (u) { unsub(); syncSessionForCurrentMode(); }
     });
@@ -174,18 +182,44 @@ export async function syncSessionForCurrentMode() {
     setPillState('fb-pill', 'syncing', 'Sync');
     if (state.mode === 'leader') {
       await window.MLFirebase.createSession({ platform: detectPlatform(), label: 'Leader' }, MAIN_SESSION_ID);
+
+      // Step 7 (Leader publish enabled) — createSession() resolving
+      // without throwing means registerDevice() succeeded with role
+      // HOST, so canControlPlayback() should now be true. If it isn't,
+      // publishPlaybackState()/publishDisplayState() in realtime.js will
+      // silently no-op (by design, for viewer devices) — which would
+      // look identical to "sync connected but nothing ever updates."
+      if (window.MLFirebase.canControlPlayback()) {
+        syncAuditPass(7, { role: window.MLFirebase.getRole && window.MLFirebase.getRole() });
+      } else {
+        syncAuditFail(7, {
+          fn: 'canControlPlayback() [services/firebase/session.js], checked after createSession()',
+          path: `sessions/${MAIN_SESSION_ID}/devices/${user.uid}/role`,
+          error: null,
+          reason: `Expected role "host" immediately after createSession() resolved, but canControlPlayback() returned false (role="${window.MLFirebase.getRole && window.MLFirebase.getRole()}"). publishPlaybackState()/publishDisplayState() will silently no-op for this device — the sync pill can still turn green while nothing this device does ever reaches Followers.`
+        });
+      }
+
       // Immediately (re-)publish whatever is currently on stage, in case
       // Follower devices were already connected and waiting.
       if (state.activeSong) publishCurrentSongIfLeader(state.activeSong);
       publishPageIfLeader(state.currentPage);
     } else {
+      console.log('[Sync Audit] Step 8 (Follower listener enabled) — attempting joinSession() + ensurePlaybackSubscription()/ensureDisplaySubscription(); the actual PASS/FAIL for the listener itself is reported by watchPlaybackState()/watchDisplayState() in services/firebase/realtime.js once the first snapshot (or cancellation) arrives.');
       await window.MLFirebase.joinSession(MAIN_SESSION_ID, { platform: detectPlatform(), label: 'Follower' }, window.MLFirebase.ROLES.VIEWER);
     }
     setPillState('fb-pill', 'connected', 'Sync');
+    syncAuditPass(9, { pillState: 'connected' });
     ensurePlaybackSubscription();
     ensureDisplaySubscription();
   } catch (err) {
     setPillState('fb-pill', 'error', 'Sync');
+    syncAuditFail(9, {
+      fn: 'syncSessionForCurrentMode() [services/ui/settings.js] catch block',
+      path: `sessions/${MAIN_SESSION_ID}`,
+      error: err,
+      reason: 'The pill was set to the error/red state because createSession()/joinSession() (or something they call) threw — see the earlier Step 4/5 FAIL entry above for the actual upstream cause; this is only the downstream UI reaction to it.'
+    });
     showToast('Sync error: ' + err.message, 'error');
   }
 }
