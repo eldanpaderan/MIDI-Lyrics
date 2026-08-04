@@ -811,3 +811,25 @@ Spreads the namespace object's exports into a plain, extensible object. Every ex
 
 ### Files Changed
 - `services/firebase/browser-bridge.js` — one line (`window.MLFirebase = MLFirebase;` → `window.MLFirebase = { ...MLFirebase };`), plus an explanatory comment. No files renamed, moved, or restructured.
+
+---
+
+## Firebase Initialization Diagnostics (audit request)
+
+Diagnostics-only addition — no architecture, file structure, or behavior change. Every existing function keeps its exact same signature, return value, and Promise resolve/reject semantics; the diagnostics are pure side-effect `console.log`/`console.group`/`console.error` calls layered on top.
+
+### `services/firebase/firebase.js`
+- **`initializeApp()` called exactly once, verified at the SDK boundary.** `window.firebase.initializeApp` itself is wrapped (once) with a call counter — not just this module's own `initialized` flag — so even a hypothetical future/legacy caller bypassing `initFirebase()` would be caught. Logs a `console.error` if it's ever invoked more than once.
+- **Immediately after `initializeApp()` actually runs** (not on the branch that reuses an already-existing `[DEFAULT]` app), logs: App Name, Project ID, Database URL, Auth Domain.
+- **Installs write diagnostics once**, by patching `firebase.database.Reference.prototype`'s `set`/`update`/`remove`/`push`/`transaction` methods. This automatically covers every write call site in `realtime.js`, `session.js`, `preference.js`, and `library.js` — none of those files needed to be touched. Before each write: logs the resolved database path and the JSON payload. After each write: logs success, or failure with the Firebase error `code` and `message`. The original Promise returned to the caller is untouched (diagnostics attach a side-effect `.then()`, they never replace/rewrap the returned Promise), so timing and error-handling behavior elsewhere in the app is unaffected.
+
+### `services/firebase/auth.js`
+- **Immediately after `signInAnonymously()` succeeds**, logs: User UID, Authentication status. Failure is left to each call site's own existing `.catch()` (unchanged), consistent with the "after signInAnonymously() succeeds" scope of the request.
+
+### Verification
+Rather than inspecting the code by eye, this was exercised end-to-end against a minimal fake of the Firebase compat SDK (Node + jsdom): `initFirebase()` called twice (second call correctly produced no duplicate `initializeApp()` invocation or duplicate log), `signInAnonymously()` resolved and logged UID/status, and `set`/`update`/`remove` all logged before/after correctly — including a forced-failure case confirming the error `code`/`message` are logged and the rejection still correctly propagates to the caller unchanged.
+
+### Files Changed
+- `services/firebase/firebase.js` — added diagnostics only (see above).
+- `services/firebase/auth.js` — added diagnostics only to `signInAnonymously()`.
+- No other files touched; no writes anywhere else in the codebase needed individual instrumentation because the `Reference.prototype` patch covers them all.
