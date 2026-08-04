@@ -30,7 +30,17 @@ export function initAuth() {
 
 /** Anonymous sign-in — gives this device/browser a stable Firebase uid. */
 export function signInAnonymously() {
-  return auth().signInAnonymously();
+  const result = auth().signInAnonymously();
+  // Diagnostics only — side-effect `.then()`, does not replace/reassign
+  // `result`, so callers still get the exact original Promise/value.
+  result.then((credential) => {
+    const user = credential && credential.user;
+    console.group('[Firebase Diagnostics] signInAnonymously() succeeded');
+    console.log('User UID:', user && user.uid);
+    console.log('Authentication status:', user ? `authenticated (anonymous: ${user.isAnonymous})` : 'unknown');
+    console.groupEnd();
+  }, () => { /* failure diagnostics intentionally left to existing callers' own .catch() handlers */ });
+  return result;
 }
 
 export function signOutUser() {
