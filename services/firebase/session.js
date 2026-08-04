@@ -30,6 +30,7 @@
  */
 import { getFirebaseApp, serverTimestamp } from './firebase.js';
 import { getCurrentUser } from './auth.js';
+import { syncAuditPass, syncAuditFail } from './sync-audit-log.js';
 
 export const ROLES = Object.freeze({
   HOST: 'host',
@@ -114,46 +115,61 @@ export async function createSession(deviceInfo = {}, requestedSessionId = null) 
   requireUser();
   const sessionId = requestedSessionId || generateSessionId();
   const ref = db().ref(`sessions/${sessionId}`);
-  const snap = await ref.get();
 
-  if (!snap.exists()) {
-    await ref.set({
-      hostId: getCurrentUser().uid,
-      createdAt: serverTimestamp(),
-      lastActivityAt: serverTimestamp(),
-      playbackState: {
-        status: 'stopped',
-        currentSongId: null,
-        currentSongName: null,
-        songUrl: null,
-        pageIndex: 0,
-        playbackPosition: 0,
-        // Reserved placeholders only — no timing engine implemented yet.
-        beat: null,
-        measure: null,
-        tempo: null,
-        updatedAt: serverTimestamp(),
-      },
-      displayState: {
-        theme: null,
-        fontSize: null,
-        fullscreen: null,
-        updatedAt: serverTimestamp(),
-      },
+  try {
+    const snap = await ref.get();
+
+    if (!snap.exists()) {
+      await ref.set({
+        hostId: getCurrentUser().uid,
+        createdAt: serverTimestamp(),
+        lastActivityAt: serverTimestamp(),
+        playbackState: {
+          status: 'stopped',
+          currentSongId: null,
+          currentSongName: null,
+          songUrl: null,
+          pageIndex: 0,
+          playbackPosition: 0,
+          // Reserved placeholders only — no timing engine implemented yet.
+          beat: null,
+          measure: null,
+          tempo: null,
+          updatedAt: serverTimestamp(),
+        },
+        displayState: {
+          theme: null,
+          fontSize: null,
+          fullscreen: null,
+          updatedAt: serverTimestamp(),
+        },
+      });
+    } else {
+      // Session already exists at this ID (e.g. a Follower joined the
+      // shared session before any Leader did, or this device is
+      // reconnecting after a refresh) — take over as host, preserving
+      // whatever playbackState/displayState is already there instead of
+      // wiping it out.
+      await ref.child('hostId').set(getCurrentUser().uid);
+    }
+
+    await registerDevice(sessionId, ROLES.HOST, deviceInfo);
+    activeSessionId = sessionId;
+    notifySessionChange();
+    syncAuditPass(4, { fn: 'createSession()', sessionId, path: `sessions/${sessionId}` });
+    return sessionId;
+  } catch (error) {
+    syncAuditFail(4, {
+      fn: 'createSession() [services/firebase/session.js]',
+      path: `sessions/${sessionId}`,
+      error,
+      reason:
+        error && error.code === 'PERMISSION_DENIED'
+          ? 'Realtime Database security rules rejected reading/writing "sessions/<id>" for this (anonymous) auth state — check rules allow it for any authenticated user, not just non-anonymous ones.'
+          : (error && error.message) || 'createSession() failed before the session document/device presence could be written — see the error above.'
     });
-  } else {
-    // Session already exists at this ID (e.g. a Follower joined the
-    // shared session before any Leader did, or this device is
-    // reconnecting after a refresh) — take over as host, preserving
-    // whatever playbackState/displayState is already there instead of
-    // wiping it out.
-    await ref.child('hostId').set(getCurrentUser().uid);
+    throw error;
   }
-
-  await registerDevice(sessionId, ROLES.HOST, deviceInfo);
-  activeSessionId = sessionId;
-  notifySessionChange();
-  return sessionId;
 }
 
 /**
@@ -167,38 +183,53 @@ export async function createSession(deviceInfo = {}, requestedSessionId = null) 
 export async function joinSession(sessionId, deviceInfo = {}, requestedRole = ROLES.VIEWER, autoCreateShell = true) {
   requireUser();
   const ref = db().ref(`sessions/${sessionId}`);
-  const snap = await ref.get();
 
-  if (!snap.exists()) {
-    if (!autoCreateShell) throw new Error(`Session "${sessionId}" was not found.`);
-    // No session yet at this ID — a device (e.g. a Follower) can still
-    // "wait" for a Leader/Host to show up. Initialize an empty, hostless
-    // shell rather than throwing; createSession() will take over as host
-    // for the same ID once a Leader activates, without resetting this
-    // shell's state.
-    await ref.set({
-      hostId: null,
-      createdAt: serverTimestamp(),
-      lastActivityAt: serverTimestamp(),
-      playbackState: {
-        status: 'stopped', currentSongId: null, currentSongName: null, songUrl: null,
-        pageIndex: 0, playbackPosition: 0, beat: null, measure: null, tempo: null,
-        updatedAt: serverTimestamp(),
-      },
-      displayState: { theme: null, fontSize: null, fullscreen: null, updatedAt: serverTimestamp() },
-    });
-  } else {
-    const sessionData = snap.val();
-    if (isSessionExpired(sessionData)) {
-      throw new Error(`Session "${sessionId}" has expired (no activity for over ${Math.round(SESSION_EXPIRATION_MS / 3600000)}h). Ask the host to start a new one.`);
+  try {
+    const snap = await ref.get();
+
+    if (!snap.exists()) {
+      if (!autoCreateShell) throw new Error(`Session "${sessionId}" was not found.`);
+      // No session yet at this ID — a device (e.g. a Follower) can still
+      // "wait" for a Leader/Host to show up. Initialize an empty, hostless
+      // shell rather than throwing; createSession() will take over as host
+      // for the same ID once a Leader activates, without resetting this
+      // shell's state.
+      await ref.set({
+        hostId: null,
+        createdAt: serverTimestamp(),
+        lastActivityAt: serverTimestamp(),
+        playbackState: {
+          status: 'stopped', currentSongId: null, currentSongName: null, songUrl: null,
+          pageIndex: 0, playbackPosition: 0, beat: null, measure: null, tempo: null,
+          updatedAt: serverTimestamp(),
+        },
+        displayState: { theme: null, fontSize: null, fullscreen: null, updatedAt: serverTimestamp() },
+      });
+    } else {
+      const sessionData = snap.val();
+      if (isSessionExpired(sessionData)) {
+        throw new Error(`Session "${sessionId}" has expired (no activity for over ${Math.round(SESSION_EXPIRATION_MS / 3600000)}h). Ask the host to start a new one.`);
+      }
     }
-  }
 
-  const safeRole = SELF_ASSIGNABLE_ROLES.has(requestedRole) ? requestedRole : ROLES.VIEWER;
-  await registerDevice(sessionId, safeRole, deviceInfo);
-  activeSessionId = sessionId;
-  notifySessionChange();
-  return sessionId;
+    const safeRole = SELF_ASSIGNABLE_ROLES.has(requestedRole) ? requestedRole : ROLES.VIEWER;
+    await registerDevice(sessionId, safeRole, deviceInfo);
+    activeSessionId = sessionId;
+    notifySessionChange();
+    syncAuditPass(4, { fn: 'joinSession()', sessionId, path: `sessions/${sessionId}`, role: safeRole });
+    return sessionId;
+  } catch (error) {
+    syncAuditFail(4, {
+      fn: 'joinSession() [services/firebase/session.js]',
+      path: `sessions/${sessionId}`,
+      error,
+      reason:
+        error && error.code === 'PERMISSION_DENIED'
+          ? 'Realtime Database security rules rejected reading/writing "sessions/<id>" for this (anonymous) auth state.'
+          : (error && error.message) || 'joinSession() failed before the session shell/device presence could be written — see the error above.'
+    });
+    throw error;
+  }
 }
 
 function isSessionExpired(sessionData) {
@@ -219,14 +250,29 @@ async function registerDevice(sessionId, deviceRole, deviceInfo) {
     deviceRef.onDisconnect().cancel();
   }
 
-  const ref = db().ref(`sessions/${sessionId}/devices/${user.uid}`);
-  await ref.set({
-    role: deviceRole,
-    platform: deviceInfo.platform || 'unknown',
-    label: deviceInfo.label || defaultLabelFor(deviceRole),
-    connectedAt: serverTimestamp(),
-    lastSeen: serverTimestamp(),
-  });
+  const presencePath = `sessions/${sessionId}/devices/${user.uid}`;
+  const ref = db().ref(presencePath);
+  try {
+    await ref.set({
+      role: deviceRole,
+      platform: deviceInfo.platform || 'unknown',
+      label: deviceInfo.label || defaultLabelFor(deviceRole),
+      connectedAt: serverTimestamp(),
+      lastSeen: serverTimestamp(),
+    });
+    syncAuditPass(5, { fn: 'registerDevice()', path: presencePath, role: deviceRole });
+  } catch (error) {
+    syncAuditFail(5, {
+      fn: 'registerDevice() [services/firebase/session.js]',
+      path: presencePath,
+      error,
+      reason:
+        error && error.code === 'PERMISSION_DENIED'
+          ? 'Realtime Database security rules rejected writing this device\'s presence node — check rules allow write access under "sessions/{sid}/devices/{uid}" for the signed-in uid.'
+          : (error && error.message) || 'The presence write itself failed — see the error above. Without this write, the device never appears connected and createSession()/joinSession() will re-throw.'
+    });
+    throw error;
+  }
   // Realtime Database presence pattern: auto-remove this device entry the
   // moment its connection drops (closed tab, lost network, app killed).
   ref.onDisconnect().remove();

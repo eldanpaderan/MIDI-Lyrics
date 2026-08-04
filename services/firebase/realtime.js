@@ -24,6 +24,7 @@
  */
 import { getFirebaseApp, serverTimestamp } from './firebase.js';
 import { getActiveSessionId, canControlPlayback, onSessionChange } from './session.js';
+import { syncAuditPass, syncAuditFail } from './sync-audit-log.js';
 
 function db() {
   return getFirebaseApp().database();
@@ -212,14 +213,42 @@ export function setTimingPlaceholders({ beat = null, measure = null, tempo = nul
 export function watchPlaybackState(callback) {
   let sid;
   try { sid = requireSession(); } catch { return () => {}; }
-  const ref = db().ref(`sessions/${sid}/playbackState`);
+  const path = `sessions/${sid}/playbackState`;
+  const ref = db().ref(path);
+  let firstSnapshotSeen = false;
   const handler = (snap) => {
     const data = snap.val() || {};
     Object.assign(lastKnownPlaybackState, data);
     beginRemoteApply();
     try { callback(data); } finally { endRemoteApply(); }
+    if (!firstSnapshotSeen) {
+      firstSnapshotSeen = true;
+      syncAuditPass(6, { fn: 'watchPlaybackState()', path });
+      if (!canControlPlayback()) syncAuditPass(8, { fn: 'watchPlaybackState()', path, role: 'viewer/follower' });
+    }
   };
-  ref.on('value', handler);
+  // NOTE: previously `ref.on('value', handler)` was called with no 3rd
+  // (cancel/error) argument at all. In the Realtime Database compat SDK,
+  // that means a permission-denied read cancels the listener SILENTLY —
+  // no error anywhere in the app, console included. Adding this callback
+  // is diagnostics-only (it doesn't change what happens on success), but
+  // it also fixes a real, previously-invisible failure mode for Step 6/8.
+  ref.on('value', handler, (error) => {
+    syncAuditFail(6, {
+      fn: 'watchPlaybackState() [services/firebase/realtime.js]',
+      path,
+      error,
+      reason: 'ref.on(\'value\', ...) was cancelled — almost always a Realtime Database security-rules ".read" permission denial for the current auth state on this path. Before this diagnostic was added, this failure was completely silent.'
+    });
+    if (!canControlPlayback()) {
+      syncAuditFail(8, {
+        fn: 'watchPlaybackState() [services/firebase/realtime.js] (Follower/Viewer role)',
+        path,
+        error,
+        reason: 'This device is in Follower/Viewer role and its playbackState listener was cancelled — it will never receive Leader updates, which is consistent with "toast says connected but nothing actually syncs."'
+      });
+    }
+  });
   return () => ref.off('value', handler);
 }
 
@@ -266,14 +295,30 @@ export function setSyncedFullscreen(fullscreen){ return publishDisplayState({ fu
 export function watchDisplayState(callback) {
   let sid;
   try { sid = requireSession(); } catch { return () => {}; }
-  const ref = db().ref(`sessions/${sid}/displayState`);
+  const path = `sessions/${sid}/displayState`;
+  const ref = db().ref(path);
+  let firstSnapshotSeen = false;
   const handler = (snap) => {
     const data = snap.val() || {};
     Object.assign(lastKnownDisplayState, data);
     beginRemoteApply();
     try { callback(data); } finally { endRemoteApply(); }
+    if (!firstSnapshotSeen) {
+      firstSnapshotSeen = true;
+      syncAuditPass(6, { fn: 'watchDisplayState()', path });
+    }
   };
-  ref.on('value', handler);
+  // See the identical note in watchPlaybackState() above — this adds the
+  // previously-missing cancel/error callback so a rules-denied read is no
+  // longer silent.
+  ref.on('value', handler, (error) => {
+    syncAuditFail(6, {
+      fn: 'watchDisplayState() [services/firebase/realtime.js]',
+      path,
+      error,
+      reason: 'ref.on(\'value\', ...) was cancelled — almost always a Realtime Database security-rules ".read" permission denial for the current auth state on this path. Before this diagnostic was added, this failure was completely silent.'
+    });
+  });
   return () => ref.off('value', handler);
 }
 

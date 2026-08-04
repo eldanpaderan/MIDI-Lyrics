@@ -9,6 +9,7 @@
  * getCurrentUser()/onAuthChange(), not on *how* the user signed in.
  */
 import { getFirebaseApp } from './firebase.js';
+import { syncAuditPass, syncAuditFail } from './sync-audit-log.js';
 
 let currentUser = null;
 const listeners = new Set();
@@ -33,13 +34,35 @@ export function signInAnonymously() {
   const result = auth().signInAnonymously();
   // Diagnostics only — side-effect `.then()`, does not replace/reassign
   // `result`, so callers still get the exact original Promise/value.
-  result.then((credential) => {
-    const user = credential && credential.user;
-    console.group('[Firebase Diagnostics] signInAnonymously() succeeded');
-    console.log('User UID:', user && user.uid);
-    console.log('Authentication status:', user ? `authenticated (anonymous: ${user.isAnonymous})` : 'unknown');
-    console.groupEnd();
-  }, () => { /* failure diagnostics intentionally left to existing callers' own .catch() handlers */ });
+  // This is the single real implementation both `MLFirebase.signInAnonymously()`
+  // (the bare namespace reference used internally by browser-bridge.js's
+  // bootstrap) and `window.MLFirebase.signInAnonymously()` resolve to —
+  // instrumenting here (rather than on the window.MLFirebase copy) is
+  // what actually guarantees this fires for every real call path.
+  result.then(
+    (credential) => {
+      const user = credential && credential.user;
+      console.group('[Firebase Diagnostics] signInAnonymously() succeeded');
+      console.log('User UID:', user && user.uid);
+      console.log('Authentication status:', user ? `authenticated (anonymous: ${user.isAnonymous})` : 'unknown');
+      console.groupEnd();
+      syncAuditPass(2, { uid: user && user.uid });
+    },
+    (error) => {
+      syncAuditFail(2, {
+        fn: 'signInAnonymously() [services/firebase/auth.js]',
+        path: '(n/a — Authentication, not Realtime Database)',
+        error,
+        reason:
+          error && error.code === 'auth/operation-not-allowed'
+            ? 'Anonymous sign-in is not enabled for this Firebase project. Enable it in Firebase Console → Authentication → Sign-in method → Anonymous. Every downstream step (session/presence/listeners) requires a signed-in user and cannot proceed without this.'
+            : 'signInAnonymously() rejected. Every downstream step (session created, presence written, listeners attached) requires getCurrentUser() to be non-null and will silently wait forever (or throw "Must be signed in") without it.'
+      });
+      // Deliberately re-thrown as a rejection (not swallowed here) so
+      // existing callers' own .catch() handlers still run exactly as
+      // before — this diagnostic branch only observes.
+    }
+  );
   return result;
 }
 

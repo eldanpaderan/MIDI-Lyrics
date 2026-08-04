@@ -11,6 +11,8 @@
  * static hosting) support <script type="module"> and import/export natively.
  */
 
+import { syncAuditPass, syncAuditFail } from './sync-audit-log.js';
+
 let app = null;
 let initialized = false;
 
@@ -55,6 +57,63 @@ function logAppDiagnostics(firebaseApp) {
   console.log('Database URL:', firebaseApp.options && firebaseApp.options.databaseURL);
   console.log('Auth Domain:', firebaseApp.options && firebaseApp.options.authDomain);
   console.groupEnd();
+}
+
+const DB_CONNECTION_TIMEOUT_MS = 10000;
+let dbConnectionWatchStarted = false;
+
+/**
+ * Step 3 (Database connection established) — Realtime Database's
+ * special `.info/connected` path reports this client's actual websocket
+ * connection state, independent of any application data. This is the
+ * only reliable way to distinguish "initializeApp() succeeded" (a
+ * config object was accepted locally) from "we actually have a live
+ * connection to the database" (a real websocket handshake completed) —
+ * they are NOT the same thing, which is exactly the gap this audit is
+ * about.
+ */
+function watchDatabaseConnectionDiagnostic(firebaseApp) {
+  if (dbConnectionWatchStarted) return;
+  dbConnectionWatchStarted = true;
+
+  let reported = false;
+  const ref = firebaseApp.database().ref('.info/connected');
+
+  const timeoutId = setTimeout(() => {
+    if (reported) return;
+    reported = true;
+    syncAuditFail(3, {
+      fn: 'watchDatabaseConnectionDiagnostic() [services/firebase/firebase.js] watching .info/connected',
+      path: '.info/connected',
+      error: null,
+      reason:
+        `No connection to the Realtime Database within ${DB_CONNECTION_TIMEOUT_MS / 1000}s of initializeApp() ` +
+        'succeeding. initializeApp() only validates the config shape locally — it does NOT verify the ' +
+        'databaseURL actually points at a real, reachable database. Most likely cause: the saved ' +
+        'databaseURL does not match this project\'s real Realtime Database instance (wrong region suffix, ' +
+        'e.g. "...firebaseio.com" vs the newer "...<region>.firebasedatabase.app" form, or a typo\'d project ' +
+        'ID), or the request is blocked by the network/firewall.'
+    });
+  }, DB_CONNECTION_TIMEOUT_MS);
+
+  ref.on('value', (snap) => {
+    const connected = snap.val() === true;
+    if (connected && !reported) {
+      reported = true;
+      clearTimeout(timeoutId);
+      syncAuditPass(3, { databaseURL: firebaseApp.options && firebaseApp.options.databaseURL });
+    }
+  }, (error) => {
+    if (reported) return;
+    reported = true;
+    clearTimeout(timeoutId);
+    syncAuditFail(3, {
+      fn: 'watchDatabaseConnectionDiagnostic() [services/firebase/firebase.js] watching .info/connected',
+      path: '.info/connected',
+      error,
+      reason: 'The .info/connected listener itself was rejected — check Realtime Database rules allow reading ".info/connected" (this path is normally exempt from rules, so this usually means the databaseURL is malformed/unreachable rather than a rules issue).'
+    });
+  });
 }
 
 function pathFromRef(ref) {
@@ -151,18 +210,29 @@ export function initFirebase(config) {
   // looking for an app named '[DEFAULT]' instead of just checking length.
   const existingDefault = (window.firebase.apps || []).find((a) => a.name === '[DEFAULT]');
   const wasAlreadyPresent = !!existingDefault;
-  app = existingDefault || window.firebase.initializeApp(config);
 
-  // "Immediately after initializeApp()" — only when we actually just
-  // called it (not when reusing an app that already existed, e.g. the
-  // legacy system beat us to it), per the audit requirement.
-  if (!wasAlreadyPresent) {
-    logAppDiagnostics(app);
-  } else {
+  if (wasAlreadyPresent) {
+    app = existingDefault;
     console.log('[Firebase Diagnostics] Reused existing [DEFAULT] app — initializeApp() not called again.');
+    syncAuditPass(1, { note: 'reused existing [DEFAULT] app', appName: app.name });
+  } else {
+    try {
+      app = window.firebase.initializeApp(config);
+    } catch (error) {
+      syncAuditFail(1, {
+        fn: 'initFirebase() [services/firebase/firebase.js] → window.firebase.initializeApp(config)',
+        path: '(n/a — app initialization, not a database path)',
+        error,
+        reason: 'window.firebase.initializeApp(config) threw synchronously — check that the config object saved by "Configure Firebase" has all required fields (apiKey, authDomain, databaseURL, projectId, appId) and that none are still the placeholder "YOUR_..." values.'
+      });
+      throw error;
+    }
+    logAppDiagnostics(app);
+    syncAuditPass(1, { appName: app.name, projectId: app.options && app.options.projectId });
   }
 
   installWriteDiagnostics();
+  watchDatabaseConnectionDiagnostic(app);
 
   initialized = true;
   return app;
