@@ -41,6 +41,11 @@ export function initLibraryUI() {
   // may not be configured/enabled yet at DOMContentLoaded time, and
   // there is no reason to hold open Realtime Database listeners for a
   // panel the person hasn't opened.
+
+  // Keep the Songs tab's offline note in sync if the connection drops
+  // (or returns) while the Library modal happens to be open.
+  window.addEventListener('online',  () => renderLibrarySongsList());
+  window.addEventListener('offline', () => renderLibrarySongsList());
 }
 
 function startLibraryWatchersIfNeeded() {
@@ -97,9 +102,32 @@ export function switchLibraryTab(tab) {
 
 /* ---------------- Songs tab: list, search, favorite, import ---------------- */
 
+/**
+ * Shows/hides the "you're offline, import is disabled, browsing cached
+ * songs still works" note above the Songs list. Uploading a new song
+ * needs to reach Firebase (see library.js's addOrUpdateSong()), so
+ * importing is disabled while offline — but the already-cached song list
+ * (services/library/library.js's on-disk cache) still renders normally,
+ * satisfying "continue working normally" while offline.
+ */
+function updateLibraryOfflineNote() {
+  const note = document.getElementById('library-import-status');
+  const importRow = document.getElementById('library-import-row');
+  if (!note || !importRow) return;
+  const offline = !navigator.onLine;
+  importRow.querySelectorAll('input, label').forEach((el) => el.classList.toggle('disabled-offline', offline));
+  if (offline) {
+    note.textContent = 'You\u2019re offline — showing cached songs. Importing new songs needs a connection.';
+    note.style.display = 'block';
+  } else {
+    note.style.display = 'none';
+  }
+}
+
 export function renderLibrarySongsList() {
   const container = document.getElementById('library-songs-list');
   if (!container) return;
+  updateLibraryOfflineNote();
 
   const results = libraryServicesAvailable()
     ? window.MLFirebase.searchLibrary(librarySearchQuery)
@@ -115,11 +143,15 @@ export function renderLibrarySongsList() {
     .sort((a, b) => (a.name || '').localeCompare(b.name || ''))
     .forEach((song) => {
       const isFav = libraryServicesAvailable() && window.MLFirebase.isFavorite(song.id);
+      const subParts = [song.artist, song.category].filter(Boolean).map(escapeHtml);
       const row = document.createElement('div');
       row.className = 'library-row';
       row.innerHTML = `
         <button class="library-fav-btn ${isFav ? 'active' : ''}" title="Toggle favorite">${isFav ? '★' : '☆'}</button>
-        <span class="library-row-name" tabindex="0" role="button" aria-label="Open ${escapeHtml(song.name)}">${escapeHtml(song.name)}</span>
+        <span class="library-row-name" tabindex="0" role="button" aria-label="Open ${escapeHtml(song.name)}">
+          <span class="library-row-title">${escapeHtml(song.name)}</span>
+          ${subParts.length ? `<span class="library-row-sub">${subParts.join(' · ')}</span>` : ''}
+        </span>
         <span class="library-row-meta">${formatTimestamp(song.updatedAt)}</span>
         <div class="library-row-actions">
           <button class="edit-btn">Edit</button>
@@ -158,10 +190,20 @@ export function handleImportTxt(inputEl) {
     inputEl.value = '';
     return;
   }
-  window.MLFirebase.importLyricsFile(file)
+
+  const artistEl   = document.getElementById('library-import-artist');
+  const categoryEl = document.getElementById('library-import-category');
+  const meta = {
+    artist:   artistEl   ? artistEl.value.trim()   : '',
+    category: categoryEl ? categoryEl.value.trim() : '',
+  };
+
+  window.MLFirebase.importLyricsFile(file, undefined, meta)
     .then(({ songName }) => {
-      showToast(`Imported "${songName}"`, 'success');
+      showToast(`Imported "${songName}" — synced to the cloud library`, 'success');
       inputEl.value = '';
+      if (artistEl)   artistEl.value   = '';
+      if (categoryEl) categoryEl.value = '';
     })
     .catch((err) => {
       showToast(`Import failed: ${err.message}`, 'error');
@@ -477,6 +519,9 @@ function playQueueIndex(index) {
 
 export function playlistQueueNext() { if (activePlaylistQueue) playQueueIndex(activePlaylistQueue.index + 1); }
 export function playlistQueuePrev() { if (activePlaylistQueue) playQueueIndex(activePlaylistQueue.index - 1); }
+
+/** Read-only accessor for the active Playlist queue ({id, name, songIds, index}) or null — used by ui/song-nav.js's Prev/Next Song toolbar buttons to walk a playing playlist instead of the general setlist/library list. */
+export function getActivePlaylistQueue() { return activePlaylistQueue; }
 
 export function stopPlaylistQueue() {
   activePlaylistQueue = null;

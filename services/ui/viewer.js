@@ -20,15 +20,18 @@
  * NOTE ON CIRCULAR IMPORTS: this file has safe, function-only circular
  * imports with utils/storage.js (loadFontSizeFromPreferences() is
  * called from storage.js's loadLocalPrefs(); getSyncedPref()/
- * setSyncedPref() are called from this file's changeFontSize()/
- * initAutoFit()/toggleAutoFit()) and with ui/settings.js (see that
- * file's own note). Safe under ES Module semantics — see the detailed
- * explanation in utils/storage.js.
+ * setSyncedPref()/cacheActiveSong()/getCachedActiveSong() are called
+ * from this file), with ui/settings.js (see that file's own note), and
+ * with ui/song-nav.js (applySongAndRender() calls
+ * updateSongNavButtons() after every song change; song-nav.js imports
+ * `state` back from here — see song-nav.js's own note). Safe under ES
+ * Module semantics — see the detailed explanation in utils/storage.js.
  */
 import { parseLyricsIntoPages } from '../library/parser.js';
-import { getSyncedPref, setSyncedPref } from '../utils/storage.js';
+import { getSyncedPref, setSyncedPref, cacheActiveSong, getCachedActiveSong } from '../utils/storage.js';
 import { debounce } from '../utils/debounce.js';
 import { publishCurrentSongIfLeader, publishPageIfLeader, publishDisplayIfLeader } from './settings.js';
+import { updateSongNavButtons } from './song-nav.js';
 
 /* ----------------------------------------------------------
    STATE
@@ -85,6 +88,39 @@ export function applySongAndRender(song, text) {
   renderPage(0, 'instant');
   renderPips();
   updateNavButtons();
+  updateSongNavButtons();
+  cacheActiveSong(song, state.pages); // offline support — see utils/storage.js
+}
+
+/**
+ * Offline support: restores the last song that was on stage from the
+ * localStorage cache written by cacheActiveSong() (see utils/storage.js),
+ * without needing any network request — used at startup when the device
+ * is offline so the person can keep working from wherever they left off
+ * instead of seeing an empty stage. No-ops if a song is already loaded
+ * (e.g. Firebase reconnected and a Follower snapshot arrived first) or
+ * if nothing was ever cached.
+ */
+export function restoreOfflineSong() {
+  if (state.activeSong) return;
+  const cached = getCachedActiveSong();
+  if (!cached || !cached.song || !Array.isArray(cached.pages) || !cached.pages.length) return;
+
+  state.activeSong  = cached.song;
+  state.currentPage = 0;
+  state.pages       = cached.pages;
+
+  document.getElementById('song-title-display').textContent = cached.song.name;
+  document.getElementById('empty-state').style.display   = 'none';
+  document.getElementById('lyric-display').style.display = 'flex';
+  document.querySelectorAll('.song-item').forEach((el) => {
+    el.classList.toggle('active', el.dataset.id === cached.song.id);
+  });
+
+  renderPage(0, 'instant');
+  renderPips();
+  updateNavButtons();
+  updateSongNavButtons();
 }
 
 export function renderPage(index, mode = 'fade') {

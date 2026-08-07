@@ -13,7 +13,12 @@
  *  - Setlists      — ordered song sequences for a specific service/event
  *
  * Realtime Database shape:
- *   library/songs/{songId}        -> { name, text, addedBy, createdAt, updatedAt }
+ *   library/songs/{songId}        -> {
+ *                                       name, text,              // canonical fields (read everywhere in the app)
+ *                                       title, lyrics, pages,    // Song Database schema aliases (title=name, lyrics=text, pages=computed)
+ *                                       artist, category,
+ *                                       addedBy, createdAt, updatedAt
+ *                                     }
  *   library/collections/{id}      -> { name, songIds: { [songId]: true }, createdAt, updatedAt }
  *   library/setlists/{id}         -> { name, songIds: [ ...ordered... ], createdAt, updatedAt }
  *
@@ -21,13 +26,68 @@
  */
 import { getFirebaseApp, serverTimestamp } from '../firebase/firebase.js';
 import { getCurrentUser } from '../firebase/auth.js';
+import { parseLyricsIntoPages } from './parser.js';
 
 function db() {
   return getFirebaseApp().database();
 }
 
-/** Local cache kept fresh by watchLibrary(); used for instant client-side search. */
-let librarySnapshot = {};
+/* ================================================================
+   OFFLINE CACHE (localStorage)
+   ================================================================
+   The Firebase Realtime Database JS SDK does not persist data to disk
+   across page reloads on its own (that's a Firestore-only feature) — it
+   only keeps synced data in memory for as long as the page/tab stays
+   open. To satisfy "cache songs locally / keep working offline / sync
+   automatically when the connection returns", every snapshot received
+   from watchLibrary() below is also mirrored into localStorage. On the
+   next page load — even fully offline — the Library starts from that
+   cached snapshot instead of an empty list, and transparently upgrades
+   to live data the moment watchLibrary()'s 'value' listener fires again
+   (Firebase's own SDK already auto-reconnects and re-fires listeners
+   when connectivity returns — no extra reconnect logic needed here). */
+const LIBRARY_CACHE_KEY      = 'mlr_library_cache';
+const LIBRARY_CACHE_META_KEY = 'mlr_library_cache_meta';
+
+function persistLibraryCache(songs) {
+  try {
+    localStorage.setItem(LIBRARY_CACHE_KEY, JSON.stringify(songs));
+    localStorage.setItem(LIBRARY_CACHE_META_KEY, JSON.stringify({ cachedAt: Date.now() }));
+  } catch {
+    // localStorage full/unavailable (private browsing, quota, etc.) —
+    // not fatal, offline cache just won't survive a reload this time.
+  }
+}
+
+/** @returns {Record<string, object>} the last snapshot saved to disk, or {} if none. */
+export function loadLibraryCacheFromDisk() {
+  try {
+    const raw = localStorage.getItem(LIBRARY_CACHE_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    return (parsed && typeof parsed === 'object') ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+/** @returns {{cachedAt: number} | null} when the on-disk cache was last written. */
+export function getLibraryCacheMeta() {
+  try {
+    const raw = localStorage.getItem(LIBRARY_CACHE_META_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Local cache kept fresh by watchLibrary(); used for instant client-side
+ * search. Seeded synchronously from the on-disk cache at module load —
+ * so getCachedLibrary()/searchLibrary() return the last-known song list
+ * immediately, even before Firebase's first 'value' event arrives (e.g.
+ * app opened while offline).
+ */
+let librarySnapshot = loadLibraryCacheFromDisk();
 
 function slugify(name) {
   return (name || 'song')
@@ -48,13 +108,27 @@ function uniqueId(base) {
 /**
  * Create or update a song's metadata + text. Preserves the original
  * `createdAt`/`addedBy` on updates.
+ *
+ * Stores the full Song Database schema:
+ *   id (the ref key), title, artist, category, lyrics, pages,
+ *   createdAt, updatedAt
+ * `name`/`text` are kept as well (aliases of title/lyrics) — every
+ * existing call site across the app (ui/dialogs.js, ui/settings.js,
+ * ui/sidebar.js's song-nav) reads song.name/song.text, so those fields
+ * must keep working unchanged; title/lyrics are additive, not a
+ * replacement.
+ *
  * @param {string} songId
- * @param {string} name
- * @param {string} text
+ * @param {string} name          - song title
+ * @param {string} text          - full lyrics text
+ * @param {{artist?: string, category?: string}} [meta]
  */
-export async function addOrUpdateSong(songId, name, text) {
+export async function addOrUpdateSong(songId, name, text, meta = {}) {
   const ref = db().ref(`library/songs/${songId}`);
   const user = getCurrentUser();
+  const pages = parseLyricsIntoPages(text);
+  const artist   = (meta.artist   || '').trim();
+  const category = (meta.category || '').trim();
 
   // Atomic transaction (not a read-then-set) so two devices importing or
   // editing the same songId concurrently can't clobber each other's write —
@@ -62,9 +136,16 @@ export async function addOrUpdateSong(songId, name, text) {
   // changed between read and write, using the freshest `existing` each time.
   const result = await ref.transaction((existing) => {
     return {
+      // Canonical fields used throughout the app:
       name,
       text,
-      addedBy: (existing && existing.addedBy) || (user && user.uid) || null,
+      // Song Database schema fields (id is the Firebase ref key itself):
+      title:    name,
+      lyrics:   text,
+      pages,
+      artist:   artist   || (existing && existing.artist)   || '',
+      category: category || (existing && existing.category) || '',
+      addedBy:   (existing && existing.addedBy)   || (user && user.uid) || null,
       createdAt: (existing && existing.createdAt) || serverTimestamp(),
       updatedAt: serverTimestamp(),
     };
@@ -76,12 +157,22 @@ export async function addOrUpdateSong(songId, name, text) {
   return songId;
 }
 
-/** Update only the lyrics text of an existing song (editing flow). */
+/** Update only the lyrics text of an existing song (editing flow). Keeps text/lyrics and the derived pages array in sync. */
 export function updateLyricsText(songId, newText) {
   return db().ref(`library/songs/${songId}`).update({
     text: newText,
+    lyrics: newText,
+    pages: parseLyricsIntoPages(newText),
     updatedAt: serverTimestamp(),
   });
+}
+
+/** Update a song's artist/category metadata without touching its lyrics. */
+export function updateSongMeta(songId, { artist, category } = {}) {
+  const updates = { updatedAt: serverTimestamp() };
+  if (artist   !== undefined) updates.artist   = (artist   || '').trim();
+  if (category !== undefined) updates.category = (category || '').trim();
+  return db().ref(`library/songs/${songId}`).update(updates);
 }
 
 export function deleteSong(songId) {
@@ -102,6 +193,7 @@ export function watchLibrary(callback) {
   const ref = db().ref('library/songs');
   const handler = (snap) => {
     librarySnapshot = snap.val() || {};
+    persistLibraryCache(librarySnapshot); // mirror every fresh snapshot to disk for offline use
     callback(librarySnapshot);
   };
   ref.on('value', handler);
@@ -126,7 +218,9 @@ export function searchLibrary(query) {
   return entries
     .filter(([, song]) =>
       (song.name || '').toLowerCase().includes(q) ||
-      (song.text || '').toLowerCase().includes(q)
+      (song.text || '').toLowerCase().includes(q) ||
+      (song.artist || '').toLowerCase().includes(q) ||
+      (song.category || '').toLowerCase().includes(q)
     )
     .map(toResult);
 }
@@ -135,12 +229,14 @@ export function searchLibrary(query) {
  * Import workflow: user selects a .txt file -> read locally -> parse name
  * -> save as TEXT into the library. The File/Blob itself is discarded
  * after reading; only the resulting string is ever written to the
- * database (no Firebase Storage is used anywhere in this project).
+ * database (no Firebase Storage is used anywhere in this project) — no
+ * GitHub commit or repository update is involved or required.
  * @param {File} file
  * @param {string} [existingSongId] - pass to overwrite an existing library song instead of creating a new one
+ * @param {{artist?: string, category?: string}} [meta]
  * @returns {Promise<{songId: string, songName: string, text: string}>}
  */
-export function importLyricsFile(file, existingSongId) {
+export function importLyricsFile(file, existingSongId, meta = {}) {
   if (!file || !file.name.toLowerCase().endsWith('.txt')) {
     return Promise.reject(new Error('Only .txt files are supported.'));
   }
@@ -151,7 +247,7 @@ export function importLyricsFile(file, existingSongId) {
     const reader = new FileReader();
     reader.onload = () => {
       const text = String(reader.result || '');
-      addOrUpdateSong(songId, songName, text)
+      addOrUpdateSong(songId, songName, text, meta)
         .then(() => resolve({ songId, songName, text }))
         .catch(reject);
     };

@@ -188,16 +188,16 @@
         <div class="dot"></div>
         <span class="label">Sync</span>
       </div>
+
+      <!-- Network / Offline Status -->
+      <div class="status-pill" id="net-pill" title="Network status — shows Offline when the device loses its connection; songs continue working from the local cache">
+        <div class="dot"></div>
+        <span class="label">Online</span>
+      </div>
     </div>
     <div id="nav-controls">
-      <button class="nav-btn" id="play-btn" onclick="playSession()" title="Play (session status)">
-        <svg viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-      </button>
-      <button class="nav-btn" id="pause-btn" onclick="pauseSession()" title="Pause (session status)">
-        <svg viewBox="0 0 24 24"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
-      </button>
-      <button class="nav-btn" id="stop-btn" onclick="stopSession()" title="Stop (session status)">
-        <svg viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14"/></svg>
+      <button class="nav-btn song-nav-btn" id="prev-song-btn" onclick="navigateSong(-1)" title="Previous Song" disabled>
+        <svg viewBox="0 0 24 24"><polygon points="19 20 9 12 19 4 19 20"/><line x1="5" y1="19" x2="5" y2="5"/></svg>
       </button>
       <button class="nav-btn" id="prev-btn" onclick="navigate(-1)" disabled>
         <svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg>
@@ -206,6 +206,9 @@
       <button class="nav-btn next-btn" id="next-btn" onclick="navigate(1)" disabled>
         Next
         <svg viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+      </button>
+      <button class="nav-btn song-nav-btn" id="next-song-btn" onclick="navigateSong(1)" title="Next Song" disabled>
+        <svg viewBox="0 0 24 24"><polygon points="5 4 15 12 5 20 5 4"/><line x1="19" y1="5" x2="19" y2="19"/></svg>
       </button>
     </div>
   </footer>
@@ -236,11 +239,16 @@
     <div class="library-panel active" id="library-panel-songs">
       <div class="library-toolbar-row">
         <input type="text" id="library-search-input" class="library-search" placeholder="Search songs or lyrics…" oninput="handleLibrarySearch(this.value)" />
+      </div>
+      <div class="library-toolbar-row" id="library-import-row">
+        <input type="text" id="library-import-artist" class="library-search" placeholder="Artist (optional)" />
+        <input type="text" id="library-import-category" class="library-search" placeholder="Category (optional)" />
         <label class="btn-primary library-import-btn" style="margin:0;">
           + Import .txt
           <input type="file" id="library-import-file" accept=".txt" style="display:none;" onchange="handleImportTxt(this)" />
         </label>
       </div>
+      <div id="library-import-status" class="library-offline-note" style="display:none;"></div>
       <div id="library-songs-list" class="library-list">
         <div class="library-empty">No songs yet. Import a .txt file to add your first cloud song.</div>
       </div>

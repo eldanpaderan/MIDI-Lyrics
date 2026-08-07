@@ -26,6 +26,9 @@ import {
   navigate, changeFontSize, toggleAutoFit, updateFontDisplay, initAutoFit, state,
 } from './services/ui/viewer.js';
 
+// --- Song navigation (Previous Song / Next Song — bottom toolbar) ---
+import { navigateSong } from './services/ui/song-nav.js';
+
 // --- Sidebar (song loading, setlist, mode) ---
 import { loadSongList, setMode } from './services/ui/sidebar.js';
 
@@ -36,11 +39,10 @@ import {
   toggleWakeLock, toggleDrawer,
 } from './services/ui/toolbar.js';
 
-// --- Settings (Firebase config modal, sync toggle, session orchestration, transport) ---
+// --- Settings (Firebase config modal, sync toggle, session orchestration) ---
 import {
   isFirebaseConfigured, loadFirebaseConfigToModal, saveFirebaseConfig,
   toggleFirebase, ensureFirebaseReady, openModal, closeModal, closeModalOutside,
-  playSession, pauseSession, stopSession,
 } from './services/ui/settings.js';
 
 // --- Dialogs (Cloud Song Library modal + Lyrics Editor) ---
@@ -54,6 +56,7 @@ import {
 
 // --- Utils ---
 import { loadLocalPrefs } from './services/utils/storage.js';
+import { initOfflineSupport } from './services/utils/offline.js';
 
 /* ----------------------------------------------------------
    Expose every function referenced by an inline HTML event handler
@@ -65,13 +68,14 @@ Object.assign(window, {
   toggleMidiLearn, clearMidiMapping,
   // Viewer
   navigate, changeFontSize, toggleAutoFit,
+  // Song navigation (Previous Song / Next Song)
+  navigateSong,
   // Sidebar
   loadSongList, setMode,
   // Toolbar
   cycleTheme, toggleFullscreen, toggleSidebarCollapse, toggleWakeLock, toggleDrawer,
   // Settings
   saveFirebaseConfig, toggleFirebase, openModal, closeModal, closeModalOutside,
-  playSession, pauseSession, stopSession,
   // Dialogs
   openLibraryModal, closeLibraryModal, closeLibraryModalOutside, switchLibraryTab,
   handleLibrarySearch, handleImportTxt, openSongFromLibrary, closeEditorModal,
@@ -89,6 +93,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initMIDI();
   loadSongList();
   loadFirebaseConfigToModal();
+  initOfflineSupport();
   const fbToggle = document.getElementById('fb-toggle');
   if (fbToggle && state.fbEnabled && isFirebaseConfigured()) {
     fbToggle.checked = true;

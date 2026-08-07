@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented here. For detailed, phase-by-phase engineering rationale, see `IMPLEMENTATION_LOG.md`.
 
+## [1.1.0] — 2026-08-07
+
+### Added
+- **Song-level transport** — the bottom toolbar's Play/Pause/Stop buttons (session-status only; they never actually played audio) are replaced with **Previous Song** / **Next Song**, positioned around the existing Prev/Next Page buttons: `[Prev Song][Prev Page][Next Page][Next Song]`. Implemented in the new `services/ui/song-nav.js`, which walks the active Playlist queue if one is playing, otherwise the local GitHub-folder setlist or the Cloud Library (A→Z) — whichever the current song belongs to. Reuses the existing song-loading entry points (`selectSong()`, `openSongFromLibrary()`), so a Leader's song change is picked up by Followers exactly the way it already was for any other song change; no new sync code was needed.
+- **Song Database schema** — Cloud Library songs now also store `title`, `artist`, `category`, `lyrics`, and a pre-computed `pages` array (in addition to the existing `name`/`text`, which remain the fields read throughout the app). The `.txt` import dialog gained optional Artist/Category fields; both are shown under the song title in the Songs tab and are searchable.
+- **Offline Support** — the Cloud Library's Firebase snapshot is now mirrored to `localStorage` on every update and re-seeded from disk on load, so the Songs list still renders while offline (including right after a page reload). The currently displayed song is separately cached and auto-restored at startup if the device is offline. A new **Online/Offline** status pill in the bottom bar and toast notifications reflect connectivity changes; the `.txt` import control disables itself (with an inline note) while offline, since writing a new song still requires reaching Firebase. Reconnection sync is automatic — the Firebase Realtime Database SDK already re-fires its `.on('value')` listeners once connectivity returns, so no manual re-sync logic was required.
+
+### Unchanged (by design)
+Firebase Authentication, the existing Leader/Follower Realtime Database sync protocol, session/presence handling, the overall modular architecture, and the visual theme were left exactly as they were.
+
 ## [1.0.0] — 2026-07-25
 
 ### Added

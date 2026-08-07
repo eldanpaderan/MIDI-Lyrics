@@ -635,6 +635,14 @@ html, body {
 }
 .nav-btn.next-btn:hover { background: var(--accent-dim); }
 
+/* Previous Song / Next Song — icon-only, narrower than the Prev/Next
+   Page buttons (which carry text labels and flex to fill the row). */
+.nav-btn.song-nav-btn {
+  flex: 0 0 auto;
+  width: 52px;
+  padding: 14px 0;
+}
+
 /* ============================================================
    FOLLOWER BANNER
    ============================================================ */
@@ -1001,16 +1009,40 @@ html, body {
 .library-row-name {
   flex: 1;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 0.88rem;
+  cursor: pointer;
+}
+.library-row-title {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 0.88rem;
-  cursor: pointer;
+  display: block;
+}
+.library-row-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: block;
+  font-size: 0.7rem;
+  font-weight: 400;
+  color: var(--text-muted);
 }
 .library-row-meta {
   font-size: 0.68rem;
   color: var(--text-muted);
   flex-shrink: 0;
+}
+.library-offline-note {
+  font-size: 0.72rem;
+  color: var(--warning);
+  padding: 0 2px 8px;
+}
+.disabled-offline {
+  opacity: 0.4;
+  pointer-events: none;
 }
 .library-fav-btn {
   background: none;
