@@ -21,6 +21,7 @@ Worthy is Your name, Jesus
 You deserve the praise
                 Bbm7
 Worthy is Your name
+[Chorus]
                 Gb      Ab
 Worthy is Your name, Jesus
                 Db/F
@@ -52,6 +53,7 @@ Worthy is Your name, Je - sus
 You deserve the praise
                 Bbm7
 Worthy is Your name
+[Chorus]
                 Gb    Bbm Ab
 Worthy is Your name, Je - sus
                 Db/F
@@ -86,7 +88,8 @@ As Your glory fills this place
 You alone deserve our praise
        Ab                  Db/F
 You're the name above all names
- 
+
+[Bridge]
      Gb
 Be exalted now in the heavens
       Ebm7
@@ -104,7 +107,8 @@ As Your glory fills this place
 You alone deserve our praise
        Ab                  Db/F
 You're the name above all names
- 
+
+[Bridge] 
      Gb
 Be exalted now in the heavens
       Ebm7
@@ -113,7 +117,8 @@ As Your glory fills this place
 You alone deserve our praise
        Ab                  Db/F
 You're the name above all names
- 
+
+[Bridge] 
      Gb
 Be exalted now in the heavens
       Ebm7
@@ -145,7 +150,7 @@ Worthy is Your name, Je - sus
 You deserve the praise
                 Bbm7
 Worthy is Your name
- 
+[Chorus] 
                 Gb    Bbm Ab
 Worthy is Your name, Je - sus
                     Db/F
